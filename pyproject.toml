@@ -13,13 +13,25 @@ requires-python = ">=3.10"
 # Windows-only packages and could not be installed anywhere else.
 dependencies = [
     "numpy>=1.24",
-    "scipy>=1.10",
     "h5py>=3.8",          # the .mat file is HDF5 (MATLAB v7.3)
     "matplotlib>=3.7",
     "PyYAML>=6.0",        # experiment configs
     "torch>=2.1",
     "torch-geometric>=2.4",
 ]
+
+# NOTE: torch and torch-geometric are listed without a CUDA build, so a
+# plain `pip install -e .` gives whatever wheel the default index serves
+# - usually CPU-only. For the GPU setup this project was developed on,
+# install torch from the PyTorch index FIRST, then this package:
+#
+#   pip install torch==2.11.0 torchvision torchaudio \
+#       --index-url https://download.pytorch.org/whl/cu130
+#   pip install pyg_lib -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
+#   pip install -e .
+#
+# docs/original-environment-windows.txt records the exact versions that
+# were working on the original Windows machine.
 
 [project.optional-dependencies]
 # Better graph partitioning for the multiscale model. Without it,
