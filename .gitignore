@@ -3,3 +3,15 @@ __pycache__/
 .ipynb_checkpoints/
 *.pyc
 *.pth
+.pytest_cache/
+*.egg-info/
+
+# Run directories: checkpoints, figures, metrics
+outputs/*
+!outputs/.gitkeep
+
+# The COMSOL export is large and lives outside version control.
+# Anchored with a leading slash: a bare "data/" would also swallow
+# src/gnn_comsol/data/, which is source code.
+/data/
+*.mat

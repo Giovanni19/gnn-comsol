@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gnn-comsol"
+version = "0.1.0"
+description = "GNN surrogate for a 2D channel flow solved in COMSOL"
+requires-python = ">=3.10"
+
+# Only what the code actually imports. The previous requirements.txt was
+# a full `pip freeze` of a Windows machine: it pinned CUDA builds and
+# Windows-only packages and could not be installed anywhere else.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "h5py>=3.8",          # the .mat file is HDF5 (MATLAB v7.3)
+    "matplotlib>=3.7",
+    "PyYAML>=6.0",        # experiment configs
+    "torch>=2.1",
+    "torch-geometric>=2.4",
+]
+
+[project.optional-dependencies]
+# Better graph partitioning for the multiscale model. Without it,
+# cluster_graph falls back to its own BFS region growing.
+metis = ["pymetis>=2023.1"]
+
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,48 @@
+# Experiment 3: virtual node on the pressure network.
+#
+# The most advanced working setup. A virtual node connected to every mesh
+# node puts any two nodes at most 2 hops apart, so global information is
+# available in a few layers.
+#
+# That is why the pressure network here needs 8 layers where experiment 2
+# used 25: the receptive field comes from the topology, not from depth.
+
+name: virtual_node
+
+seed: 68
+
+dataset:
+  path: data/channel2d_gnn_dataset.mat
+  skip_initial: 1        # the first snapshot is the initial condition
+
+split:
+  mode: temporal
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  num_epochs: 200
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure
+    features: time_fourier
+    architecture: gcn_virtual_node
+    num_neurons: 64
+    num_layers: 8
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3

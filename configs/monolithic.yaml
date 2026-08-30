@@ -1,0 +1,38 @@
+# Experiment 1: a single network predicting u, v and p together.
+#
+# This is where the project started. Its result is the reason all the
+# other experiments exist: the velocity is learned well and the pressure
+# is not, with an error three to four orders of magnitude larger.
+#
+# The original script swept hyperparameters, but every list had been
+# reduced to a single value. The sweep is kept here (any of the fields
+# below may be a list) so the machinery stays usable.
+
+name: monolithic
+
+seed: 68
+
+dataset:
+  path: data/channel2d_gnn_dataset.mat
+  skip_initial: 1        # the first snapshot is the initial condition
+
+split:
+  mode: temporal
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  num_epochs: 200
+  batch_size: 8
+
+networks:
+  state:
+    predicts: state          # all three columns: u, v, p
+    features: time           # u, v, p, dt  -> 4 input features
+    architecture: gcn
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5

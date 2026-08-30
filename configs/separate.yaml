@@ -1,0 +1,51 @@
+# Experiment 2: one network for velocity, one for pressure.
+#
+# The direct answer to the diagnosis of experiment 1. Separating the two
+# stops the large pressure gradients from dominating the shared loss.
+#
+# The pressure network is given a Fourier encoding of the time step and
+# is much deeper (25 layers), an attempt to widen the receptive field
+# enough to capture the non-local nature of pressure. Note that a GCN
+# this deep, with no residual connections and no normalization, is prone
+# to over-smoothing; experiment 3 reaches further with 8 layers by using
+# a virtual node instead.
+
+name: separate
+
+seed: 68
+
+dataset:
+  path: data/channel2d_gnn_dataset.mat
+  skip_initial: 1        # the first snapshot is the initial condition
+
+split:
+  mode: temporal
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  num_epochs: 200
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity       # columns u, v
+    features: time           # 4 input features
+    architecture: gcn
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure       # column p
+    features: time_fourier   # 12 input features
+    architecture: gcn
+    num_neurons: 128
+    num_layers: 25
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3

@@ -1,0 +1,50 @@
+# How to sweep hyperparameters.
+#
+# Any of num_neurons, num_layers, dropout, learning_rate and
+# weight_decay may be a list. Every combination is trained, the one with
+# the lowest validation loss is kept, and the full table is written to
+# sweep.csv in the run directory.
+#
+# The example below is 2 x 3 = 6 configurations for the pressure network
+# and a single one for the velocity network, so 7 trainings in total.
+# With 200 epochs each this is not a quick run.
+
+name: sweep_example
+
+seed: 68
+
+dataset:
+  path: data/channel2d_gnn_dataset.mat
+  skip_initial: 1        # the first snapshot is the initial condition
+
+split:
+  mode: temporal
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  num_epochs: 200
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure
+    features: time_fourier
+    architecture: gcn_virtual_node
+    num_neurons: [64, 128]
+    num_layers: [4, 8, 12]
+    dropout: 0.0
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3
