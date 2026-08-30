@@ -52,7 +52,17 @@ def set_seeds(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    torch.use_deterministic_algorithms(True)
+    # Nice to have, not required for correctness. Several PyTorch
+    # Geometric ops use scatter kernels with no deterministic CUDA
+    # implementation, and enabling this makes them raise. Losing exact
+    # reproducibility is a much smaller problem than not running at all.
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception as error:
+        print(
+            f"Note: deterministic algorithms unavailable ({error}). "
+            "Runs stay seeded but are not bit-for-bit reproducible."
+        )
 
 
 def main():
