@@ -7,7 +7,7 @@ from .features import (
     add_time_fourier_features,
     build_features
 )
-from .graphs import create_graph_dataset, to_tensor
+from .graphs import create_bsms_dataset, create_graph_dataset, to_tensor
 from .loading import RawDataset, load_data
 from .normalization import (
     PRESSURE_COLUMNS,

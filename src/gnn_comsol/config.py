@@ -25,12 +25,14 @@ networks:
   <network name>:
     predicts: velocity | pressure | state
     features: time | time_fourier
-    architecture: gcn | gcn_virtual_node
+    architecture: gcn | gcn_virtual_node | bsms
     num_neurons: int or [int, ...]
     num_layers: int or [int, ...]
     dropout: float or [float, ...]
     learning_rate: float or [float, ...]
     weight_decay: float or [float, ...]
+    unet_depth: int          # BSMS only
+    hidden_layers: int       # BSMS only
 
 Any of the last five may be a list, in which case every combination is
 trained and the one with the lowest validation loss is kept.
@@ -85,6 +87,10 @@ NETWORK_DEFAULTS = {
     "weight_decay": 1.0e-5
 }
 
+BSMS_DEFAULTS = {
+    "unet_depth": 2,
+    "hidden_layers": 2,
+}
 
 def load_config(path):
     """Read, fill in defaults and validate an experiment file."""
@@ -146,6 +152,9 @@ def _validate(config, path):
 
         merged = dict(NETWORK_DEFAULTS)
         merged.update(network or {})
+        if merged["architecture"] == "bsms":
+            for key, value in BSMS_DEFAULTS.items():
+                merged.setdefault(key, value)
         networks[name] = merged
 
         predicts = merged.get("predicts")
@@ -169,7 +178,37 @@ def _validate(config, path):
                 f"architecture={merged['architecture']!r}. "
                 f"Expected one of {sorted(ARCHITECTURES)}."
             )
+        if merged["architecture"] == "bsms":
 
+            if merged["predicts"] != "pressure":
+                raise ValueError(
+                    f"{path}: BSMS network {name!r} must currently use "
+                    "predicts='pressure'."
+                )
+
+            if not isinstance(merged["unet_depth"], int):
+                raise ValueError(
+                    f"{path}: BSMS network {name!r} requires "
+                    "unet_depth to be an integer."
+                )
+
+            if merged["unet_depth"] < 1:
+                raise ValueError(
+                    f"{path}: BSMS network {name!r} requires "
+                    "unet_depth >= 1."
+                )
+
+            if not isinstance(merged["hidden_layers"], int):
+                raise ValueError(
+                    f"{path}: BSMS network {name!r} requires "
+                    "hidden_layers to be an integer."
+                )
+
+            if merged["hidden_layers"] < 1:
+                raise ValueError(
+                    f"{path}: BSMS network {name!r} requires "
+                    "hidden_layers >= 1."
+                )
         coverage[TARGET_COLUMNS[predicts]] += 1
 
     if not np.all(coverage == 1):

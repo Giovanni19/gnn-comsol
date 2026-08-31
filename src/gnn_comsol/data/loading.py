@@ -60,6 +60,7 @@ class RawDataset:
     edge_weight: np.ndarray
     delta_t: np.ndarray
     h: np.ndarray
+    pos: np.ndarray
 
     @property
     def num_samples(self):
@@ -118,10 +119,12 @@ def load_data(file_path, skip_initial=1):
         edge_weight = np.array(f["edge_weight"])
         t = np.array(f["t"])
         h = np.array(f["h"])
+        P = np.array(f["P"])
 
     # MATLAB stores arrays in Fortran order: (3, N, T) -> (T, N, 3)
     X = np.transpose(X, (2, 1, 0))
 
+    edge_index = edge_index.astype(np.int64)
     edge_weight = edge_weight.squeeze()
     t = t.squeeze()
     h = h.squeeze()
@@ -152,5 +155,6 @@ def load_data(file_path, skip_initial=1):
         edge_index=edge_index,
         edge_weight=edge_weight,
         delta_t=delta_t,
-        h=h
+        h=h,
+        pos=P
     )

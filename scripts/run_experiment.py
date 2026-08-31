@@ -20,7 +20,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DataLoader as PyGDataLoader
+from torch.utils.data import DataLoader as TensorDataLoader
 
 # Make the package importable without installing it first
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -37,7 +38,7 @@ from gnn_comsol.evaluate import (                         # noqa: E402
 )
 from gnn_comsol.models import build_model                 # noqa: E402
 from gnn_comsol.train import train_network                # noqa: E402
-
+from gnn_comsol.graph.bsms import BistrideMultiLayerGraph
 
 def set_seeds(seed):
 
@@ -177,6 +178,78 @@ def main():
 
     edge_index = gdata.to_tensor(raw.edge_index, dtype=torch.long)
     edge_weight = gdata.to_tensor(raw.edge_weight)
+    # ---------------------------------------------------------------
+    # BSMS hierarchy
+    # ---------------------------------------------------------------
+
+    uses_bsms = any(
+        network["architecture"] == "bsms"
+        for network in config["networks"].values()
+    )
+
+    bsms_data = None
+
+    if uses_bsms:
+
+        bsms_networks = [
+            network
+            for network in config["networks"].values()
+            if network["architecture"] == "bsms"
+        ]
+
+        unet_depths = {
+            network["unet_depth"]
+            for network in bsms_networks
+        }
+
+        if len(unet_depths) != 1:
+            raise ValueError(
+                "All BSMS networks in one experiment must currently "
+                "use the same unet_depth."
+            )
+
+        unet_depth = next(iter(unet_depths))
+
+        multi_layer_graph = BistrideMultiLayerGraph(
+            raw.edge_index,
+            unet_depth,
+            raw.num_nodes,
+            raw.pos,
+        )
+
+        _, m_flat_es, m_ids = (
+            multi_layer_graph.get_multi_layer_graphs()
+        )
+
+        bsms_data = {
+            "edge_indices": [
+                torch.tensor(edges, dtype=torch.long)
+                for edges in m_flat_es
+            ],
+            "pool_indices": [
+                torch.tensor(indices, dtype=torch.long)
+                for indices in m_ids
+            ],
+            "pos": torch.tensor(
+                raw.pos,
+                dtype=torch.float32,
+            ),
+        }
+
+        print("\nBSMS hierarchy:")
+
+        n_nodes = raw.num_nodes
+
+        for level, edges in enumerate(m_flat_es):
+
+            print(
+                f"  Level {level}: "
+                f"{n_nodes} nodes, "
+                f"{edges.shape[1]} edges"
+            )
+
+            if level < len(m_ids):
+                n_nodes = len(m_ids[level])
 
     # ---------------------------------------------------------------
     # One dataset per feature encoding, shared by the networks that use
@@ -184,45 +257,70 @@ def main():
     # selects its own columns inside the training loop.
     # ---------------------------------------------------------------
 
-    encodings = {
-        network["features"]
-        for network in config["networks"].values()
-    }
+    
+
+    # ---------------------------------------------------------------
+    # One loader set per network.
+    #
+    # Standard GNNs use PyG batches.
+    # BSMS uses dense tensor batches [B, N, F] because every snapshot
+    # shares exactly the same mesh hierarchy.
+    # ---------------------------------------------------------------
 
     loaders = {}
 
     batch_size = config["training"]["batch_size"]
 
-    for encoding in encodings:
+    for network_name, network in config["networks"].items():
 
-        loaders[encoding] = {}
+        encoding = network["features"]
+        architecture = network["architecture"]
+
+        loaders[network_name] = {}
 
         for name in blocks:
 
             features = gdata.build_features(
                 encoding,
                 normalized[name]["X"],
-                normalized[name]["dt"]
+                normalized[name]["dt"],
             )
 
-            dataset = gdata.create_graph_dataset(
-                features,
-                normalized[name]["Y"],
-                edge_index,
-                edge_weight
-            )
+            if architecture == "bsms":
 
-            loaders[encoding][name] = DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=(name == "train")
-            )
+                dataset = gdata.create_bsms_dataset(
+                    features,
+                    normalized[name]["Y"],
+                )
+
+                loader = TensorDataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    shuffle=(name == "train"),
+                )
+
+            else:
+
+                dataset = gdata.create_graph_dataset(
+                    features,
+                    normalized[name]["Y"],
+                    edge_index,
+                    edge_weight,
+                )
+
+                loader = PyGDataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    shuffle=(name == "train"),
+                )
+
+            loaders[network_name][name] = loader
 
         print(
-            f"Encoding {encoding!r}: "
-            f"{gdata.FEATURE_SIZES[encoding]} input features"
+            f"Network {network_name!r}: "
+            f"{gdata.FEATURE_SIZES[encoding]} input features | "
+            f"architecture={architecture}"
         )
-
     # ---------------------------------------------------------------
     # Train each network
     # ---------------------------------------------------------------
@@ -241,7 +339,7 @@ def main():
         num_in = gdata.FEATURE_SIZES[network["features"]]
         num_out = len(range(*columns.indices(3)))
 
-        encoding_loaders = loaders[network["features"]]
+        network_loaders = loaders[network_name]
 
         combinations = expand_grid(network)
 
@@ -269,13 +367,29 @@ def main():
 
             set_seeds(config["seed"])
 
+            model_kwargs = {
+                "architecture": concrete["architecture"],
+                "num_in": num_in,
+                "num_out": num_out,
+                "num_neurons": concrete["num_neurons"],
+                "num_layers": concrete["num_layers"],
+                "dropout": concrete["dropout"],
+            }
+
+            if concrete["architecture"] == "bsms":
+
+                model_kwargs.update(
+                    {
+                        "edge_indices": bsms_data["edge_indices"],
+                        "pool_indices": bsms_data["pool_indices"],
+                        "pos": bsms_data["pos"],
+                        "unet_depth": concrete["unet_depth"],
+                        "hidden_layers": concrete["hidden_layers"],
+                    }
+                )
+
             model = build_model(
-                architecture=concrete["architecture"],
-                num_in=num_in,
-                num_out=num_out,
-                num_neurons=concrete["num_neurons"],
-                num_layers=concrete["num_layers"],
-                dropout=concrete["dropout"]
+                **model_kwargs
             ).to(device)
 
             optimizer = optim.Adam(
@@ -286,8 +400,8 @@ def main():
 
             state, train_history, val_history = train_network(
                 model,
-                encoding_loaders["train"],
-                encoding_loaders["val"],
+                network_loaders["train"],
+                network_loaders["val"],
                 criterion,
                 optimizer,
                 num_epochs,
@@ -312,7 +426,9 @@ def main():
                             "learning_rate",
                             "weight_decay"
                         )
-                    }
+                    },
+                    "unet_depth": concrete.get("unet_depth"),
+                    "hidden_layers": concrete.get("hidden_layers"),
                 }
             )
 
@@ -348,6 +464,7 @@ def main():
                 "split_mode": split_config["mode"],
                 "num_epochs": num_epochs,
                 "batch_size": batch_size,
+
                 **{
                     key: best["config"][key]
                     for key in (
@@ -358,7 +475,12 @@ def main():
                         "learning_rate",
                         "weight_decay"
                     )
-                }
+                },
+
+                # BSMS-specific parameters.
+                # None for architectures that do not use BSMS.
+                "unet_depth": best["config"].get("unet_depth"),
+                "hidden_layers": best["config"].get("hidden_layers"),
             }
         )
 
@@ -375,7 +497,7 @@ def main():
             "features": network["features"],
             "test_loss": evaluate_dataset(
                 best["model"],
-                encoding_loaders["test"],
+                network_loaders["test"],
                 criterion,
                 device,
                 columns

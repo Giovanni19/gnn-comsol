@@ -70,6 +70,10 @@ def format_metrics(metrics, title="INFERENCE RESULTS (physical units)"):
 def evaluate_dataset(net, loader, criterion, device, target_columns):
     """
     Mean loss of a network over a loader, in normalized units.
+
+    Supports both:
+    - standard PyG Data batches;
+    - BSMS tensor batches (X, Y).
     """
 
     net.eval()
@@ -80,12 +84,26 @@ def evaluate_dataset(net, loader, criterion, device, target_columns):
 
         for batch in loader:
 
-            batch = batch.to(device)
+            if isinstance(batch, (list, tuple)):
 
-            preds = net(batch)
-            target = batch.y[:, target_columns]
+                X, Y = batch
 
-            losses.append(criterion(preds, target).item())
+                X = X.to(device)
+                Y = Y.to(device)
+
+                preds = net(X)
+                target = Y[..., target_columns]
+
+            else:
+
+                batch = batch.to(device)
+
+                preds = net(batch)
+                target = batch.y[:, target_columns]
+
+            losses.append(
+                criterion(preds, target).item()
+            )
 
     return float(np.mean(losses))
 
@@ -157,16 +175,23 @@ def predict_next_timestep(
             device=device
         )
 
-        graph = Data(
-            x=x,
-            edge_index=edge_index,
-            edge_weight=edge_weight
-        )
-
         model.eval()
 
         with torch.no_grad():
-            out = model(graph)
+
+            if getattr(model, "uses_bsms_tensor_input", False):
+
+                out = model(x)
+
+            else:
+
+                graph = Data(
+                    x=x,
+                    edge_index=edge_index,
+                    edge_weight=edge_weight
+                )
+
+                out = model(graph)
 
         out = normalizer.inverse_transform(out, columns)
 

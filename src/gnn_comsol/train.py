@@ -12,6 +12,37 @@ import copy
 import numpy as np
 import torch
 
+def _prepare_batch(batch, net, device, target_columns):
+    """
+    Prepare either a standard PyG batch or a BSMS tensor batch.
+
+    Standard PyG models:
+        batch -> Data
+        prediction = net(batch)
+
+    BSMS models:
+        batch -> (X, Y)
+        prediction = net(X)
+    """
+
+    if isinstance(batch, (list, tuple)):
+
+        X, Y = batch
+
+        X = X.to(device)
+        Y = Y.to(device)
+
+        preds = net(X)
+        target = Y[..., target_columns]
+
+    else:
+
+        batch = batch.to(device)
+
+        preds = net(batch)
+        target = batch.y[:, target_columns]
+
+    return preds, target
 
 def train_network(
     net,
@@ -65,12 +96,14 @@ def train_network(
 
         for batch in train_loader:
 
-            batch = batch.to(device)
-
             optimizer.zero_grad()
 
-            preds = net(batch)
-            target = batch.y[:, target_columns]
+            preds, target = _prepare_batch(
+                batch,
+                net,
+                device,
+                target_columns,
+            )
 
             loss = criterion(preds, target)
 
@@ -93,15 +126,16 @@ def train_network(
 
             for batch in val_loader:
 
-                batch = batch.to(device)
-
-                preds = net(batch)
-                target = batch.y[:, target_columns]
+                preds, target = _prepare_batch(
+                    batch,
+                    net,
+                    device,
+                    target_columns,
+                )
 
                 val_losses.append(
                     criterion(preds, target).item()
                 )
-
         mean_val_loss = float(np.mean(val_losses))
 
         train_loss_history.append(mean_train_loss)

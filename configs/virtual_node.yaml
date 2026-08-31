@@ -12,7 +12,7 @@ name: virtual_node
 seed: 68
 
 dataset:
-  path: data/channel2d_gnn_dataset.mat
+  path: C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_gnn_dataset.mat
   skip_initial: 1        # the first snapshot is the initial condition
 
 split:

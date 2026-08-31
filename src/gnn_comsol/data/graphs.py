@@ -46,3 +46,23 @@ def create_graph_dataset(X, Y, edge_index, edge_weight):
         )
         for i in range(X.shape[0])
     ]
+
+
+from torch.utils.data import TensorDataset
+
+
+def create_bsms_dataset(X, Y):
+    """
+    Build a dataset for BSMS models.
+
+    Unlike the standard PyG graph dataset, the mesh topology is not
+    duplicated for every snapshot. Each item contains only the node
+    features and target.
+
+    The fixed BSMS hierarchy and mesh positions are stored by the model.
+    """
+
+    X = X if isinstance(X, torch.Tensor) else to_tensor(X)
+    Y = Y if isinstance(Y, torch.Tensor) else to_tensor(Y)
+
+    return TensorDataset(X, Y)
