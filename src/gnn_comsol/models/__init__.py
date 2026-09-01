@@ -2,8 +2,10 @@
 Model registry.
 
 Standard graph models and the BSMS pressure model are exposed through
-one factory. BSMS additionally requires the fixed multiscale hierarchy
-of the mesh.
+one factory.
+
+The BSMS model is mesh-independent: the multiscale hierarchy is supplied
+at forward time, so the same model can operate on different geometries.
 """
 
 from .gcn import GCNNet
@@ -26,16 +28,15 @@ def build_model(
     num_layers,
     dropout,
     *,
-    edge_indices=None,
-    pool_indices=None,
-    pos=None,
     unet_depth=None,
     hidden_layers=None,
+    pos_dim=2,
 ):
     """
     Instantiate a network by the name used in the config files.
 
-    BSMS additionally requires the fixed multiscale mesh hierarchy.
+    For BSMS, the mesh hierarchy is NOT stored inside the model.
+    edge_indices, pool_indices and pos are supplied at forward time.
     """
 
     if architecture not in ARCHITECTURES:
@@ -52,30 +53,22 @@ def build_model(
                 "pressure prediction (num_out=1)."
             )
 
-        if edge_indices is None:
-            raise ValueError("BSMS requires edge_indices.")
-
-        if pool_indices is None:
-            raise ValueError("BSMS requires pool_indices.")
-
-        if pos is None:
-            raise ValueError("BSMS requires node positions.")
-
         if unet_depth is None:
-            raise ValueError("BSMS requires unet_depth.")
+            raise ValueError(
+                "BSMS requires unet_depth."
+            )
 
         if hidden_layers is None:
-            raise ValueError("BSMS requires hidden_layers.")
+            raise ValueError(
+                "BSMS requires hidden_layers."
+            )
 
         return PressureBSMSGNN(
             num_in=num_in,
             latent_dim=num_neurons,
             unet_depth=unet_depth,
             hidden_layers=hidden_layers,
-            edge_indices=edge_indices,
-            pool_indices=pool_indices,
-            pos=pos,
-            pos_dim=pos.shape[-1],
+            pos_dim=pos_dim,
         )
 
     return ARCHITECTURES[architecture](

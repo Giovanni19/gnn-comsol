@@ -34,10 +34,11 @@ from gnn_comsol.evaluate import (                         # noqa: E402
     evaluate_dataset,
     format_metrics,
     per_variable_metrics,
-    predict_next_timestep
+    predict_next_timestep,
+    evaluate_bsms_multi_simulation,
 )
 from gnn_comsol.models import build_model                 # noqa: E402
-from gnn_comsol.train import train_network                # noqa: E402
+from gnn_comsol.train import train_network, train_bsms_multi_simulation                # noqa: E402
 from gnn_comsol.graph.bsms import BistrideMultiLayerGraph
 
 def set_seeds(seed):
@@ -65,6 +66,56 @@ def set_seeds(seed):
             "Runs stay seeded but are not bit-for-bit reproducible."
         )
 
+def predict_velocity_features(
+    model,
+    features,
+    edge_index,
+    edge_weight,
+    device,
+):
+    """
+    Run the trained velocity network on every snapshot and return
+    normalized predictions of u(t+1), v(t+1).
+
+    Returns
+    -------
+    predictions : np.ndarray
+        Shape [num_samples, num_nodes, 2].
+    """
+
+    model.eval()
+
+    dataset = gdata.create_graph_dataset(
+        features,
+        np.zeros(
+            (features.shape[0], features.shape[1], 3),
+            dtype=np.float32,
+        ),
+        edge_index,
+        edge_weight,
+    )
+
+    loader = PyGDataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+    )
+
+    predictions = []
+
+    with torch.no_grad():
+
+        for batch in loader:
+
+            batch = batch.to(device)
+
+            output = model(batch)
+
+            predictions.append(
+                output.detach().cpu().numpy()[None, ...]
+            )
+
+    return np.concatenate(predictions, axis=0)
 
 def main():
 
@@ -111,83 +162,143 @@ def main():
     # Data
     # ---------------------------------------------------------------
 
-    raw = gdata.load_data(
-        config["dataset"]["path"],
+    simulations = gdata.load_simulations(
+        config["dataset"]["paths"],
         skip_initial=config["dataset"]["skip_initial"]
     )
 
     print(
-        f"\nDataset: {raw.num_samples} samples, "
-        f"{raw.num_nodes} nodes, {raw.num_edges} edges "
+        f"\nLoaded {len(simulations)} simulations "
         f"({config['dataset']['skip_initial']} initial snapshot(s) "
-        f"dropped)"
+        f"dropped per simulation)"
     )
+
+    for simulation in simulations:
+
+        print(
+            f"  Simulation {simulation.simulation_id}: "
+            f"{simulation.num_samples} samples | "
+            f"{simulation.num_nodes} nodes | "
+            f"{simulation.num_edges} edges | "
+            f"{simulation.file_path}"
+        )
+
+    
 
     # If the solver used a constant step this is ~0 and the time feature
     # carries no information; if it is large the step varies a lot.
-    print(
-        f"Time step: mean={raw.delta_t.mean():.4e} "
-        f"min={raw.delta_t.min():.4e} "
-        f"max={raw.delta_t.max():.4e} "
-        f"| coeff. of variation="
-        f"{raw.delta_t.std() / raw.delta_t.mean():.4f}"
-    )
+    for simulation in simulations:
+
+        dt = simulation.delta_t
+
+        print(
+            f"  Simulation {simulation.simulation_id} dt: "
+            f"mean={dt.mean():.4e} | "
+            f"min={dt.min():.4e} | "
+            f"max={dt.max():.4e}"
+        )
 
     split_config = config["split"]
 
-    splits = gdata.split_dataset(
-        raw,
-        mode=split_config["mode"],
+    splits = gdata.split_simulations(
+        simulations,
         train_fraction=split_config["train_fraction"],
-        val_fraction=split_config["val_fraction"],
-        gap=split_config["gap"],
         seed=config["seed"]
     )
+    print("\nSimulation split:")
 
-    print(gdata.format_split_statistics(splits))
+    for name in ("train", "val", "test"):
+
+        split_simulations = getattr(splits, name)
+
+        print(
+            f"\n{name.upper()} "
+            f"({len(split_simulations)} simulations)"
+        )
+
+        for simulation in split_simulations:
+
+            print(
+                f"  Simulation {simulation.simulation_id}: "
+                f"{simulation.num_nodes} nodes | "
+                f"{simulation.num_samples} samples | "
+                f"{simulation.file_path}"
+            )
 
     # ---------------------------------------------------------------
     # Scaling, computed on the training block only
     # ---------------------------------------------------------------
 
     x_mean, x_std, dt_mean, dt_std = (
-        gdata.compute_normalization_parameters(
-            splits.train.X,
-            splits.train.dt
+        gdata.compute_multi_simulation_normalization_parameters(
+            splits.train
         )
     )
 
-    normalizer = gdata.StateNormalizer(x_mean, x_std)
+    normalizer = gdata.StateNormalizer(
+        x_mean,
+        x_std
+    )
 
     print(f"\n{normalizer}")
+
+    print(
+        f"delta_t normalization: "
+        f"mean={dt_mean:.6e}, std={dt_std:.6e}"
+    )
+
 
     blocks = {
         "train": splits.train,
         "val": splits.val,
-        "test": splits.test
+        "test": splits.test,
     }
 
-    normalized = {
-        name: {
-            "X": normalizer.transform(block.X),
-            "Y": normalizer.transform(block.Y),
-            "dt": (block.dt - dt_mean) / dt_std
-        }
-        for name, block in blocks.items()
-    }
+    normalized = {}
 
-    edge_index = gdata.to_tensor(raw.edge_index, dtype=torch.long)
-    edge_weight = gdata.to_tensor(raw.edge_weight)
-    # ---------------------------------------------------------------
-    # BSMS hierarchy
-    # ---------------------------------------------------------------
+    for split_name, split_simulations in blocks.items():
+
+        normalized[split_name] = []
+
+        for simulation in split_simulations:
+
+            normalized_simulation = {
+                "X": normalizer.transform(
+                    simulation.X_input
+                ),
+
+                "Y": normalizer.transform(
+                    simulation.Y_target
+                ),
+
+                "dt": (
+                    simulation.delta_t - dt_mean
+                ) / dt_std,
+
+                # Keep the graph belonging to this simulation
+                "edge_index": simulation.edge_index,
+                "edge_weight": simulation.edge_weight,
+                "pos": simulation.pos,
+
+                "simulation_id": simulation.simulation_id,
+                "file_path": simulation.file_path,
+            }
+
+            normalized[split_name].append(
+                normalized_simulation
+            )
+
+    
+# ---------------------------------------------------------------
+# BSMS hierarchies
+# ---------------------------------------------------------------
 
     uses_bsms = any(
         network["architecture"] == "bsms"
         for network in config["networks"].values()
     )
 
-    bsms_data = None
+    bsms_hierarchies = {}
 
     if uses_bsms:
 
@@ -210,47 +321,64 @@ def main():
 
         unet_depth = next(iter(unet_depths))
 
-        multi_layer_graph = BistrideMultiLayerGraph(
-            raw.edge_index,
-            unet_depth,
-            raw.num_nodes,
-            raw.pos,
-        )
+        print("\nBuilding BSMS hierarchies:")
 
-        _, m_flat_es, m_ids = (
-            multi_layer_graph.get_multi_layer_graphs()
-        )
+        for simulation in simulations:
 
-        bsms_data = {
-            "edge_indices": [
-                torch.tensor(edges, dtype=torch.long)
-                for edges in m_flat_es
-            ],
-            "pool_indices": [
-                torch.tensor(indices, dtype=torch.long)
-                for indices in m_ids
-            ],
-            "pos": torch.tensor(
-                raw.pos,
-                dtype=torch.float32,
-            ),
-        }
-
-        print("\nBSMS hierarchy:")
-
-        n_nodes = raw.num_nodes
-
-        for level, edges in enumerate(m_flat_es):
-
-            print(
-                f"  Level {level}: "
-                f"{n_nodes} nodes, "
-                f"{edges.shape[1]} edges"
+            multi_layer_graph = BistrideMultiLayerGraph(
+                simulation.edge_index,
+                unet_depth,
+                simulation.num_nodes,
+                simulation.pos,
             )
 
-            if level < len(m_ids):
-                n_nodes = len(m_ids[level])
+            _, m_flat_es, m_ids = (
+                multi_layer_graph.get_multi_layer_graphs()
+            )
+            if len(m_flat_es) != unet_depth + 1:
+                raise ValueError(
+                    f"Simulation {simulation.simulation_id}: "
+                    f"expected {unet_depth + 1} BSMS edge levels, "
+                    f"got {len(m_flat_es)}."
+                )
 
+            if len(m_ids) != unet_depth:
+                raise ValueError(
+                    f"Simulation {simulation.simulation_id}: "
+                    f"expected {unet_depth} pooling levels, "
+                    f"got {len(m_ids)}."
+                )
+
+            bsms_hierarchies[
+                simulation.simulation_id
+            ] = {
+                "edge_indices": [
+                    torch.tensor(
+                        edges,
+                        dtype=torch.long,
+                    )
+                    for edges in m_flat_es
+                ],
+
+                "pool_indices": [
+                    torch.tensor(
+                        indices,
+                        dtype=torch.long,
+                    )
+                    for indices in m_ids
+                ],
+
+                "pos": torch.tensor(
+                    simulation.pos,
+                    dtype=torch.float32,
+                ),
+            }
+
+            print(
+                f"  Simulation {simulation.simulation_id}: "
+                f"{simulation.num_nodes} fine nodes -> "
+                f"{len(m_flat_es)} BSMS levels"
+            )           
     # ---------------------------------------------------------------
     # One dataset per feature encoding, shared by the networks that use
     # it. The target is always the full normalized state; each network
@@ -266,66 +394,91 @@ def main():
     # BSMS uses dense tensor batches [B, N, F] because every snapshot
     # shares exactly the same mesh hierarchy.
     # ---------------------------------------------------------------
-
-    loaders = {}
-
     batch_size = config["training"]["batch_size"]
 
-    for network_name, network in config["networks"].items():
 
-        encoding = network["features"]
-        architecture = network["architecture"]
+    # ===============================================================
+    # Velocity loaders
+    # ===============================================================
 
-        loaders[network_name] = {}
+    velocity_network = config["networks"]["velocity"]
 
-        for name in blocks:
+    velocity_loaders = {}
 
-            features = gdata.build_features(
-                encoding,
-                normalized[name]["X"],
-                normalized[name]["dt"],
+    for split_name in ("train", "val", "test"):
+
+        velocity_dataset = (
+            gdata.create_multi_simulation_graph_dataset(
+                normalized[split_name],
+                velocity_network["features"],
             )
+        )
 
-            if architecture == "bsms":
-
-                dataset = gdata.create_bsms_dataset(
-                    features,
-                    normalized[name]["Y"],
-                )
-
-                loader = TensorDataLoader(
-                    dataset,
-                    batch_size=batch_size,
-                    shuffle=(name == "train"),
-                )
-
-            else:
-
-                dataset = gdata.create_graph_dataset(
-                    features,
-                    normalized[name]["Y"],
-                    edge_index,
-                    edge_weight,
-                )
-
-                loader = PyGDataLoader(
-                    dataset,
-                    batch_size=batch_size,
-                    shuffle=(name == "train"),
-                )
-
-            loaders[network_name][name] = loader
+        velocity_loaders[split_name] = PyGDataLoader(
+            velocity_dataset,
+            batch_size=batch_size,
+            shuffle=(split_name == "train"),
+        )
 
         print(
-            f"Network {network_name!r}: "
-            f"{gdata.FEATURE_SIZES[encoding]} input features | "
-            f"architecture={architecture}"
+            f"Velocity {split_name}: "
+            f"{len(velocity_dataset)} graph samples"
         )
+
+
+    # ===============================================================
+    # Pressure BSMS loaders
+    # ===============================================================
+
+    pressure_loaders = {
+        "train": {},
+        "val": {},
+        "test": {},
+    }
+
+    if uses_bsms:
+
+        pressure_network = config["networks"]["pressure"]
+        pressure_encoding = pressure_network["features"]
+
+        for split_name in ("train", "val", "test"):
+
+            for simulation in normalized[split_name]:
+
+                simulation_id = simulation["simulation_id"]
+
+                features = gdata.build_features(
+                    pressure_encoding,
+                    simulation["X"],
+                    simulation["dt"],
+                )
+
+                pressure_dataset = gdata.create_bsms_dataset(
+                    features,
+                    simulation["Y"],
+                )
+
+                pressure_loader = TensorDataLoader(
+                    pressure_dataset,
+                    batch_size=batch_size,
+                    shuffle=(split_name == "train"),
+                )
+
+                pressure_loaders[
+                    split_name
+                ][simulation_id] = pressure_loader
+
+                print(
+                    f"Pressure {split_name} | "
+                    f"simulation {simulation_id}: "
+                    f"{len(pressure_dataset)} samples | "
+                    f"{simulation['X'].shape[1]} nodes"
+                )
     # ---------------------------------------------------------------
     # Train each network
     # ---------------------------------------------------------------
 
-    criterion = nn.MSELoss()
+    criterion = nn.HuberLoss(delta=1.0)
 
     num_epochs = config["training"]["num_epochs"]
 
@@ -334,12 +487,34 @@ def main():
 
     for network_name, network in config["networks"].items():
 
-        columns = gdata.TARGET_COLUMNS[network["predicts"]]
+        # ---------------------------------------------------------
+        # TEMPORARY TEST:
+        # validate multi-geometry training on velocity first.
+        # Pressure / BSMS will be added afterwards.
+        # ---------------------------------------------------------
 
-        num_in = gdata.FEATURE_SIZES[network["features"]]
-        num_out = len(range(*columns.indices(3)))
 
-        network_loaders = loaders[network_name]
+        encoding = network["features"]
+        architecture = network["architecture"]
+
+        if architecture == "bsms":
+            network_loaders = pressure_loaders
+        else:
+            network_loaders = velocity_loaders
+
+        use_predicted_velocity = False
+
+        columns = gdata.TARGET_COLUMNS[
+            network["predicts"]
+        ]
+
+        num_in = gdata.FEATURE_SIZES[
+            network["features"]
+        ]
+
+        num_out = len(
+            range(*columns.indices(3))
+        )
 
         combinations = expand_grid(network)
 
@@ -380,11 +555,9 @@ def main():
 
                 model_kwargs.update(
                     {
-                        "edge_indices": bsms_data["edge_indices"],
-                        "pool_indices": bsms_data["pool_indices"],
-                        "pos": bsms_data["pos"],
                         "unet_depth": concrete["unet_depth"],
                         "hidden_layers": concrete["hidden_layers"],
+                        "pos_dim": 2,
                     }
                 )
 
@@ -398,17 +571,38 @@ def main():
                 weight_decay=concrete["weight_decay"]
             )
 
-            state, train_history, val_history = train_network(
-                model,
-                network_loaders["train"],
-                network_loaders["val"],
-                criterion,
-                optimizer,
-                num_epochs,
-                device,
-                target_columns=columns,
-                verbose=not args.quiet
-            )
+            if architecture == "bsms":
+
+                state, train_history, val_history = (
+                    train_bsms_multi_simulation(
+                        model,
+                        network_loaders["train"],
+                        network_loaders["val"],
+                        bsms_hierarchies,
+                        criterion,
+                        optimizer,
+                        num_epochs,
+                        device,
+                        target_columns=columns,
+                        verbose=not args.quiet,
+                    )
+                )
+
+            else:
+
+                state, train_history, val_history = (
+                    train_network(
+                        model,
+                        network_loaders["train"],
+                        network_loaders["val"],
+                        criterion,
+                        optimizer,
+                        num_epochs,
+                        device,
+                        target_columns=columns,
+                        verbose=not args.quiet,
+                    )
+                )
 
             best_val = min(val_history)
 
@@ -432,7 +626,7 @@ def main():
                 }
             )
 
-            print(f"Best validation MSE: {best_val:.6e}")
+            print(f"Best validation loss: {best_val:.6e}")
 
             if best is None or best_val < best["val_loss"]:
                 best = {
@@ -459,6 +653,9 @@ def main():
                 "network": network_name,
                 "predicts": network["predicts"],
                 "features": network["features"],
+                "use_predicted_velocity": network.get(
+                    "use_predicted_velocity",
+                    False),
                 "num_in": num_in,
                 "num_out": num_out,
                 "split_mode": split_config["mode"],
@@ -491,22 +688,41 @@ def main():
             title=network_name
         )
 
-        trained[network_name] = {
-            "model": best["model"],
-            "columns": columns,
-            "features": network["features"],
-            "test_loss": evaluate_dataset(
+        if architecture == "bsms":
+
+            test_loss = evaluate_bsms_multi_simulation(
+                best["model"],
+                network_loaders["test"],
+                bsms_hierarchies,
+                criterion,
+                device,
+                target_columns=columns,
+            )
+
+        else:
+
+            test_loss = evaluate_dataset(
                 best["model"],
                 network_loaders["test"],
                 criterion,
                 device,
-                columns
+                columns,
             )
-        }
 
+
+        trained[network_name] = {
+            "model": best["model"],
+            "columns": columns,
+            "features": network["features"],
+            "use_predicted_velocity": network.get(
+                "use_predicted_velocity",
+                False
+            ),
+            "test_loss": test_loss,
+        }
         print(
             f"Saved {checkpoint_path.name} | "
-            f"test MSE (normalized) "
+            f"test loss (normalized) "
             f"{trained[network_name]['test_loss']:.6e}"
         )
 
@@ -514,27 +730,9 @@ def main():
     # One-step inference on a snapshot from the TEST block
     # ---------------------------------------------------------------
 
-    test_indices = splits.test.indices
-
-    timestep = int(test_indices[len(test_indices) // 2])
-
-    print(f"\nInference on timestep {timestep} (test block)")
-
-    Y_pred = predict_next_timestep(
-        trained,
-        raw.X_input[timestep],
-        raw.delta_t[timestep],
-        edge_index,
-        edge_weight,
-        normalizer,
-        dt_mean,
-        dt_std,
-        device
-    )
-
-    metrics = per_variable_metrics(raw.Y_target[timestep], Y_pred)
-
-    print(format_metrics(metrics))
+    # ---------------------------------------------------------------
+    # One-step inference on an unseen TEST simulation
+    # ---------------------------------------------------------------
 
     # ---------------------------------------------------------------
     # Persist the numbers
@@ -542,12 +740,26 @@ def main():
 
     results = {
         "experiment": config["name"],
-        "timestep": timestep,
+
+        "train_simulations": [
+            sim.simulation_id
+            for sim in splits.train
+        ],
+
+        "val_simulations": [
+            sim.simulation_id
+            for sim in splits.val
+        ],
+
+        "test_simulations": [
+            sim.simulation_id
+            for sim in splits.test
+        ],
+
         "test_loss_normalized": {
             name: spec["test_loss"]
             for name, spec in trained.items()
         },
-        "inference_metrics_physical": metrics
     }
 
     with open(run_dir / "metrics.json", "w") as handle:

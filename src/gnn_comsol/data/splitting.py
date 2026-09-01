@@ -282,3 +282,136 @@ def format_split_statistics(splits):
             )
 
     return "\n".join(lines)
+
+@dataclass
+class SimulationSplits:
+    train: list
+    val: list
+    test: list
+
+
+def split_simulations(
+    simulations,
+    train_fraction=0.70,
+    seed=68,
+):
+    """
+    Split complete simulations into train, validation and test.
+
+    Rules
+    -----
+    1. Train receives train_fraction of the simulations,
+       rounded to the nearest integer.
+
+    2. The remaining simulations are split equally between
+       validation and test.
+
+    3. If the number of remaining simulations is odd,
+       test receives one more simulation than validation.
+
+    The split is performed at simulation level, so all timesteps
+    of a simulation always belong to the same split.
+    """
+
+    n_simulations = len(simulations)
+
+    if n_simulations < 3:
+        raise ValueError(
+            "At least 3 simulations are required."
+        )
+
+    # ---------------------------------------------------------
+    # Shuffle simulations reproducibly
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    indices = np.arange(n_simulations)
+
+    rng.shuffle(indices)
+
+    # ---------------------------------------------------------
+    # Number of training simulations
+    # ---------------------------------------------------------
+
+    n_train = int(
+        np.round(n_simulations * train_fraction)
+    )
+
+    # Make sure validation and test can contain at least one
+    # simulation each.
+    n_train = min(
+        n_train,
+        n_simulations - 2
+    )
+
+    # ---------------------------------------------------------
+    # Split remaining simulations between validation and test
+    # ---------------------------------------------------------
+
+    n_remaining = n_simulations - n_train
+
+    # If odd, test automatically receives the extra simulation.
+    n_val = n_remaining // 2
+
+    n_test = n_remaining - n_val
+
+    # ---------------------------------------------------------
+    # Split indices
+    # ---------------------------------------------------------
+
+    train_indices = indices[:n_train]
+
+    val_indices = indices[
+        n_train:n_train + n_val
+    ]
+
+    test_indices = indices[
+        n_train + n_val:
+    ]
+
+    # ---------------------------------------------------------
+    # Build simulation lists
+    # ---------------------------------------------------------
+
+    train = [
+        simulations[i]
+        for i in train_indices
+    ]
+
+    val = [
+        simulations[i]
+        for i in val_indices
+    ]
+
+    test = [
+        simulations[i]
+        for i in test_indices
+    ]
+    print(
+        f"Simulation split: "
+        f"{n_train} train | "
+        f"{n_val} val | "
+        f"{n_test} test"
+    )
+
+    print(
+        "Train simulations:",
+        [sim.simulation_id for sim in train]
+    )
+
+    print(
+        "Validation simulations:",
+        [sim.simulation_id for sim in val]
+    )
+
+    print(
+        "Test simulations:",
+        [sim.simulation_id for sim in test]
+    )
+
+    return SimulationSplits(
+        train=train,
+        val=val,
+        test=test,
+    )

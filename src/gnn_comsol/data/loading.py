@@ -62,6 +62,9 @@ class RawDataset:
     h: np.ndarray
     pos: np.ndarray
 
+    simulation_id: int | None = None
+    file_path: str | None = None
+
     @property
     def num_samples(self):
         return len(self.X_input)
@@ -75,7 +78,7 @@ class RawDataset:
         return self.edge_index.shape[1]
 
 
-def load_data(file_path, skip_initial=1):
+def load_data(file_path, skip_initial=0, simulation_id=None):
     """
     Load one simulation and build the one-step-ahead pairs.
 
@@ -148,7 +151,34 @@ def load_data(file_path, skip_initial=1):
     X_input = X[skip_initial:-1]
     Y_target = X[skip_initial + 1:]
     delta_t = step[skip_initial:]
+    # ------------------------------------------------------------
+    # Consistency checks
+    # ------------------------------------------------------------
 
+    num_nodes = X_input.shape[1]
+
+    # P may be stored as (N, 2) or (2, N)
+    if P.shape[0] == num_nodes:
+        pos = P
+    elif P.shape[1] == num_nodes:
+        pos = P.T
+    else:
+        raise ValueError(
+            f"{file_path}: position array P has shape {P.shape}, "
+            f"but the state has {num_nodes} nodes."
+        )
+
+    if edge_index.min() < 0:
+        raise ValueError(
+            f"{file_path}: edge_index contains negative indices."
+        )
+
+    if edge_index.max() >= num_nodes:
+        raise ValueError(
+            f"{file_path}: edge_index references node "
+            f"{edge_index.max()}, but the mesh has only "
+            f"{num_nodes} nodes."
+        )
     return RawDataset(
         X_input=X_input,
         Y_target=Y_target,
@@ -156,5 +186,25 @@ def load_data(file_path, skip_initial=1):
         edge_weight=edge_weight,
         delta_t=delta_t,
         h=h,
-        pos=P
+        pos=pos,
+        simulation_id=simulation_id,
+        file_path=str(file_path)
     )
+
+
+def load_simulations(file_paths, skip_initial=0):
+
+    simulations = []
+
+    for simulation_id, file_path in enumerate(file_paths):
+
+        simulation = load_data(
+            file_path,
+            skip_initial=skip_initial,
+            simulation_id=simulation_id,
+        )
+
+        simulations.append(simulation)
+
+    return simulations
+

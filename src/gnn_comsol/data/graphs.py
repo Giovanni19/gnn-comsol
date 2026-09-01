@@ -9,46 +9,46 @@ edge_index and edge_weight.
 import numpy as np
 import torch
 from torch_geometric.data import Data
-
+from .features import build_features
+from torch.utils.data import TensorDataset
 
 def to_tensor(array, dtype=torch.float32):
     return torch.tensor(np.asarray(array), dtype=dtype)
 
 
-def create_graph_dataset(X, Y, edge_index, edge_weight):
+def create_graph_dataset(X, Y, edge_index, edge_weight, simulation_id=None):
     """
     Build one Data object per snapshot.
-
-    Parameters
-    ----------
-    X : (S, N, F) array or tensor
-        Node features, already normalized and with the time encoding.
-
-    Y : (S, N, C) array or tensor
-        Target, already normalized. The full state is kept here and the
-        columns of interest are selected inside the training loop, so
-        that one dataset can serve networks predicting different
-        variables.
-
-    edge_index : (2, E) long tensor
-    edge_weight : (E,) float tensor
     """
 
     X = X if isinstance(X, torch.Tensor) else to_tensor(X)
     Y = Y if isinstance(Y, torch.Tensor) else to_tensor(Y)
+
+    edge_index = (
+        edge_index
+        if isinstance(edge_index, torch.Tensor)
+        else to_tensor(edge_index, dtype=torch.long)
+    )
+
+    edge_weight = (
+        edge_weight
+        if isinstance(edge_weight, torch.Tensor)
+        else to_tensor(edge_weight)
+    )
 
     return [
         Data(
             x=X[i],
             y=Y[i],
             edge_index=edge_index,
-            edge_weight=edge_weight
+            edge_weight=edge_weight,
+            simulation_id=simulation_id
         )
         for i in range(X.shape[0])
     ]
 
 
-from torch.utils.data import TensorDataset
+
 
 
 def create_bsms_dataset(X, Y):
@@ -66,3 +66,35 @@ def create_bsms_dataset(X, Y):
     Y = Y if isinstance(Y, torch.Tensor) else to_tensor(Y)
 
     return TensorDataset(X, Y)
+
+def create_multi_simulation_graph_dataset(
+    simulations,
+    encoding,
+):
+    """
+    Build one PyG dataset from multiple simulations.
+
+    Each timestep transition becomes an independent PyG Data object.
+    Simulations may have different numbers of nodes and edges.
+    """
+
+    dataset = []
+
+    for simulation in simulations:
+
+        features = build_features(
+            encoding,
+            simulation["X"],
+            simulation["dt"],
+        )
+
+        simulation_dataset = create_graph_dataset(
+            features,
+            simulation["Y"],
+            simulation["edge_index"],
+            simulation["edge_weight"],
+        )
+
+        dataset.extend(simulation_dataset)
+
+    return dataset

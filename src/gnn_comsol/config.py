@@ -118,10 +118,30 @@ def load_config(path):
 
 def _validate(config, path):
 
-    if "dataset" not in config or "path" not in (config["dataset"] or {}):
+    dataset = config.get("dataset", {})
+
+    has_path = (
+        "path" in dataset
+        and dataset["path"] is not None
+    )
+
+    has_paths = (
+        "paths" in dataset
+        and isinstance(dataset["paths"], list)
+        and len(dataset["paths"]) > 0
+    )
+
+    if not has_path and not has_paths:
         raise ValueError(
-            f"{path}: a 'dataset.path' pointing at the .mat file "
-            "is required."
+            f"{path}: dataset must contain either "
+            "'dataset.path' for one simulation or "
+            "'dataset.paths' for multiple simulations."
+        )
+
+    if has_path and has_paths:
+        raise ValueError(
+            f"{path}: use either 'dataset.path' or "
+            "'dataset.paths', not both."
         )
 
     skip_initial = config["dataset"]["skip_initial"]
@@ -139,12 +159,32 @@ def _validate(config, path):
 
     mode = config["split"]["mode"]
 
-    if mode not in ("temporal", "group", "random"):
+    if mode not in ("temporal", "group", "random", "simulation"):
         raise ValueError(
             f"{path}: unknown split mode {mode!r}. "
-            "Expected 'temporal', 'group' or 'random'."
+            "Expected 'temporal', 'group', 'random' or 'simulation'."
         )
+    if mode == "simulation":
 
+        if not has_paths:
+            raise ValueError(
+                f"{path}: split mode 'simulation' requires "
+                "'dataset.paths' with multiple simulations."
+            )
+
+        train_fraction = config["split"].get("train_fraction")
+
+        if train_fraction is None:
+            raise ValueError(
+                f"{path}: split mode 'simulation' requires "
+                "'split.train_fraction'."
+            )
+
+        if not 0 < train_fraction < 1:
+            raise ValueError(
+                f"{path}: split.train_fraction must be between 0 and 1, "
+                f"got {train_fraction!r}."
+            )
     # Every state column must be predicted by exactly one network
     coverage = np.zeros(3, dtype=int)
 
@@ -211,13 +251,25 @@ def _validate(config, path):
                 )
         coverage[TARGET_COLUMNS[predicts]] += 1
 
-    if not np.all(coverage == 1):
+    allow_partial_state = config.get(
+        "allow_partial_state",
+        False
+    )
+
+    if np.any(coverage > 1):
+        raise ValueError(
+            f"{path}: some state variables are predicted by more than "
+            f"one network; coverage per column is {coverage.tolist()}."
+        )
+
+    if not allow_partial_state and not np.all(coverage == 1):
         raise ValueError(
             f"{path}: the networks must predict u, v and p exactly once "
             f"between them; coverage per column is {coverage.tolist()}. "
             "Use one network with predicts='state', or one with "
             "'velocity' and one with 'pressure'."
         )
+
 
 
 def expand_grid(network):

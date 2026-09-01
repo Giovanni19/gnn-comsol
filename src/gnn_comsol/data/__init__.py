@@ -7,8 +7,20 @@ from .features import (
     add_time_fourier_features,
     build_features
 )
-from .graphs import create_bsms_dataset, create_graph_dataset, to_tensor
-from .loading import RawDataset, load_data
+
+from .graphs import (
+    create_bsms_dataset,
+    create_graph_dataset,
+    create_multi_simulation_graph_dataset,
+    to_tensor
+)
+
+from .loading import (
+    RawDataset,
+    load_data,
+    load_simulations
+)
+
 from .normalization import (
     PRESSURE_COLUMNS,
     STATE_COLUMNS,
@@ -16,15 +28,20 @@ from .normalization import (
     VARIABLE_NAMES,
     VELOCITY_COLUMNS,
     StateNormalizer,
-    compute_normalization_parameters
+    compute_normalization_parameters,
+    compute_multi_simulation_normalization_parameters
 )
+
 from .splitting import (
     Split,
     SplitDataset,
+    SimulationSplits,
     compute_split_indices,
     format_split_statistics,
-    split_dataset
+    split_dataset,
+    split_simulations
 )
+
 
 __all__ = [
     "FEATURE_SIZES",
@@ -33,6 +50,7 @@ __all__ = [
     "STATE_COLUMNS",
     "Split",
     "SplitDataset",
+    "SimulationSplits",
     "StateNormalizer",
     "TARGET_COLUMNS",
     "VARIABLE_NAMES",
@@ -42,10 +60,15 @@ __all__ = [
     "add_time_fourier_features",
     "build_features",
     "compute_normalization_parameters",
+    "compute_multi_simulation_normalization_parameters",
     "compute_split_indices",
+    "create_bsms_dataset",
     "create_graph_dataset",
+    "create_multi_simulation_graph_dataset",
     "format_split_statistics",
     "load_data",
+    "load_simulations",
     "split_dataset",
+    "split_simulations",
     "to_tensor"
 ]
