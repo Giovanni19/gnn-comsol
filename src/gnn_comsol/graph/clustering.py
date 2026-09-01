@@ -1,14 +1,14 @@
 """
-Coarsening the mesh graph.
+Coarsening the mesh graph by clustering.
 
-The multiscale pressure model needs two things that the dataset does not
-provide: a `cluster` vector assigning every fine node to a cluster, and
-the connectivity of the resulting coarse graph. This module produces
-both.
+Produces a `cluster` vector assigning every fine node to a cluster, plus
+the connectivity of the resulting coarse graph.
 
-The previous version of this file had a well-documented PyMETIS adapter
-followed by an unrelated toy snippet that ran at import time, and nothing
-that actually returned a cluster vector.
+STATUS: not used by any experiment. It was written for the earlier
+multiscale pressure model, which BSMS superseded; bsms.py builds its
+hierarchy by bi-stride selection instead, and carries its own graph
+utilities. Kept because it is tested and is the only clustering-based
+coarsening available, but it is currently exercised only by its tests.
 """
 
 from collections import deque

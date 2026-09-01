@@ -66,56 +66,6 @@ def set_seeds(seed):
             "Runs stay seeded but are not bit-for-bit reproducible."
         )
 
-def predict_velocity_features(
-    model,
-    features,
-    edge_index,
-    edge_weight,
-    device,
-):
-    """
-    Run the trained velocity network on every snapshot and return
-    normalized predictions of u(t+1), v(t+1).
-
-    Returns
-    -------
-    predictions : np.ndarray
-        Shape [num_samples, num_nodes, 2].
-    """
-
-    model.eval()
-
-    dataset = gdata.create_graph_dataset(
-        features,
-        np.zeros(
-            (features.shape[0], features.shape[1], 3),
-            dtype=np.float32,
-        ),
-        edge_index,
-        edge_weight,
-    )
-
-    loader = PyGDataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
-    )
-
-    predictions = []
-
-    with torch.no_grad():
-
-        for batch in loader:
-
-            batch = batch.to(device)
-
-            output = model(batch)
-
-            predictions.append(
-                output.detach().cpu().numpy()[None, ...]
-            )
-
-    return np.concatenate(predictions, axis=0)
 
 def main():
 
@@ -262,30 +212,13 @@ def main():
 
         for simulation in split_simulations:
 
-            normalized_simulation = {
-                "X": normalizer.transform(
-                    simulation.X_input
-                ),
-
-                "Y": normalizer.transform(
-                    simulation.Y_target
-                ),
-
-                "dt": (
-                    simulation.delta_t - dt_mean
-                ) / dt_std,
-
-                # Keep the graph belonging to this simulation
-                "edge_index": simulation.edge_index,
-                "edge_weight": simulation.edge_weight,
-                "pos": simulation.pos,
-
-                "simulation_id": simulation.simulation_id,
-                "file_path": simulation.file_path,
-            }
-
             normalized[split_name].append(
-                normalized_simulation
+                gdata.normalize_simulation(
+                    simulation,
+                    normalizer,
+                    dt_mean,
+                    dt_std,
+                )
             )
 
     

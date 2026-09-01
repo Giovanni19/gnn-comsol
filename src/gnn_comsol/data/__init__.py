@@ -29,7 +29,8 @@ from .normalization import (
     VELOCITY_COLUMNS,
     StateNormalizer,
     compute_normalization_parameters,
-    compute_multi_simulation_normalization_parameters
+    compute_multi_simulation_normalization_parameters,
+    normalize_simulation
 )
 
 from .splitting import (
@@ -67,6 +68,7 @@ __all__ = [
     "create_multi_simulation_graph_dataset",
     "format_split_statistics",
     "load_data",
+    "normalize_simulation",
     "load_simulations",
     "split_dataset",
     "split_simulations",

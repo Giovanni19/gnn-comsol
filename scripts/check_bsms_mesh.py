@@ -1,4 +1,3 @@
-import sys
 import numpy as np
 
 from gnn_comsol.graph.bsms import BistrideMultiLayerGraph
