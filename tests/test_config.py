@@ -96,7 +96,7 @@ def test_overlapping_coverage_is_rejected(tmp_path):
         }
     }
 
-    with pytest.raises(ValueError, match="exactly once"):
+    with pytest.raises(ValueError, match="more than one network"):
         load_config(write(tmp_path, overlapping))
 
 
@@ -189,3 +189,90 @@ def test_expand_grid_preserves_other_fields():
     for concrete in expand_grid(network):
         assert concrete["predicts"] == "pressure"
         assert concrete["architecture"] == "gcn_virtual_node"
+
+
+# ---------------------------------------------------------------------
+# One simulation or many
+# ---------------------------------------------------------------------
+
+MULTI = {
+    "name": "multi",
+    "dataset": {"paths": ["a.mat", "b.mat", "c.mat"]},
+    "split": {"mode": "simulation", "train_fraction": 0.70},
+    "networks": BASE["networks"]
+}
+
+
+def test_paths_is_accepted_for_multiple_simulations(tmp_path):
+
+    config = load_config(write(tmp_path, MULTI))
+
+    assert len(config["dataset"]["paths"]) == 3
+
+
+def test_path_and_paths_together_are_rejected(tmp_path):
+
+    both = {
+        **MULTI,
+        "dataset": {"path": "a.mat", "paths": ["a.mat", "b.mat", "c.mat"]}
+    }
+
+    with pytest.raises(ValueError, match="not both"):
+        load_config(write(tmp_path, both))
+
+
+def test_simulation_split_requires_paths(tmp_path):
+
+    single = {
+        **BASE,
+        "split": {"mode": "simulation", "train_fraction": 0.70}
+    }
+
+    with pytest.raises(ValueError, match="requires"):
+        load_config(write(tmp_path, single))
+
+
+@pytest.mark.parametrize("fraction", [0.0, 1.0, 1.5, -0.2])
+def test_simulation_split_rejects_impossible_fractions(
+    tmp_path, fraction
+):
+
+    bad = {
+        **MULTI,
+        "split": {"mode": "simulation", "train_fraction": fraction}
+    }
+
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        load_config(write(tmp_path, bad))
+
+
+def test_allow_partial_state_permits_a_velocity_only_experiment(tmp_path):
+    """
+    A velocity-only run is legitimate while the pressure head is being
+    worked on, but only if the config says so explicitly.
+    """
+
+    velocity_only = {
+        **MULTI,
+        "allow_partial_state": True,
+        "networks": {"velocity": {"predicts": "velocity"}}
+    }
+
+    config = load_config(write(tmp_path, velocity_only))
+
+    assert set(config["networks"]) == {"velocity"}
+
+    # Without the flag the same config must still be refused
+    del velocity_only["allow_partial_state"]
+
+    with pytest.raises(ValueError, match="exactly once"):
+        load_config(write(tmp_path, velocity_only, name="no_flag.yaml"))
+
+
+@pytest.mark.parametrize("skip", [-1, 1.5, "two"])
+def test_invalid_skip_initial_is_rejected(tmp_path, skip):
+
+    bad = {**BASE, "dataset": {"path": "a.mat", "skip_initial": skip}}
+
+    with pytest.raises(ValueError, match="skip_initial"):
+        load_config(write(tmp_path, bad))

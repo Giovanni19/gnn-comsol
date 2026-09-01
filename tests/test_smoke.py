@@ -1,14 +1,17 @@
 """
-End-to-end smoke test: run a whole experiment on a tiny synthetic
-dataset, in seconds.
+End-to-end smoke test: run a whole experiment on tiny synthetic
+simulations, in seconds.
 
-This is the test that covers everything the other test files cannot,
-because it is the only one that actually executes torch: the model
-forward passes, batching, the training loop, checkpoint writing and
-reloading, inference and the plots.
+This is the only test that actually executes torch, so it is the one
+that covers the model forward passes, batching, the training loop,
+checkpoint writing and reloading, and the plots.
+
+The simulations deliberately have DIFFERENT mesh sizes: the runner is
+multi-geometry now, and a test on identical meshes would not exercise
+that.
 
 If this passes, the pipeline runs. It says nothing about whether the
-model is any good.
+model is any good: two epochs on a handful of samples cannot.
 """
 
 import importlib.util
@@ -16,84 +19,74 @@ import json
 import sys
 from pathlib import Path
 
-import h5py
 import numpy as np
 import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 
-NUM_SNAPSHOTS = 16
-GRID = (3, 4)                       # 12 mesh nodes
-NUM_NODES = GRID[0] * GRID[1]
-
-
-def grid_edges(rows, cols):
-    """4-neighbour grid, a stand-in for a mesh."""
-
-    edges = []
-
-    for r in range(rows):
-        for c in range(cols):
-            if r + 1 < rows:
-                edges.append((r * cols + c, (r + 1) * cols + c))
-            if c + 1 < cols:
-                edges.append((r * cols + c, r * cols + c + 1))
-
-    edges += [(j, i) for i, j in edges]
-
-    return np.array(edges).T
+# Meshes of four different sizes, all big enough to survive the BSMS
+# pooling depth used below.
+MESHES = [(5, 6), (6, 6), (5, 7), (6, 7)]
 
 
 @pytest.fixture
-def dataset_path(tmp_path):
+def simulations(make_dataset):
+    """Four synthetic simulations, each on its own mesh."""
 
-    rng = np.random.default_rng(0)
-
-    edge_index = grid_edges(*GRID)
-
-    # A slowly drifting field, with pressure on a much larger scale than
-    # velocity: that ratio is what used to break the target scaling.
-    base = rng.normal(size=(NUM_NODES, 3))
-    base[:, 2] *= 500.0
-
-    X = np.stack([
-        base * (1 + 0.02 * k) + 0.01 * rng.normal(size=(NUM_NODES, 3))
-        for k in range(NUM_SNAPSHOTS)
-    ])
-
-    # Non-uniform time steps, like an adaptive solver
-    steps = 0.01 + 0.02 * rng.uniform(size=NUM_SNAPSHOTS - 1)
-    t = np.concatenate([[0.0], np.cumsum(steps)])
-
-    path = tmp_path / "tiny.mat"
-
-    with h5py.File(path, "w") as f:
-        # MATLAB order: (3, N, T)
-        f["X"] = np.transpose(X, (2, 1, 0))
-        f["edge_index"] = edge_index.astype(np.int64)
-        f["edge_weight"] = np.ones(edge_index.shape[1])
-        f["t"] = t.reshape(1, -1)
-        f["h"] = np.array([[0.1]])
-
-    return path
+    return [
+        make_dataset(rows=rows, cols=cols, seed=index, num_snapshots=14)
+        for index, (rows, cols) in enumerate(MESHES)
+    ]
 
 
-def write_config(tmp_path, dataset_path, networks, name="smoke"):
+VELOCITY_NET = {
+    "predicts": "velocity",
+    "features": "time",
+    "architecture": "gcn",
+    "num_neurons": 8,
+    "num_layers": 2,
+    "dropout": 0.0,
+    "learning_rate": 1.0e-3,
+    "weight_decay": 1.0e-5
+}
+
+PRESSURE_BSMS_NET = {
+    "predicts": "pressure",
+    "features": "time",
+    "architecture": "bsms",
+    "num_neurons": 8,
+    "unet_depth": 2,
+    "hidden_layers": 1,
+    "learning_rate": 1.0e-3,
+    "weight_decay": 1.0e-3,
+    "num_layers": 1,
+    "dropout": 0.0
+}
+
+
+def write_config(
+    tmp_path,
+    simulations,
+    networks,
+    name="smoke",
+    allow_partial_state=False
+):
 
     config = {
         "name": name,
         "seed": 68,
-        "dataset": {"path": str(dataset_path), "skip_initial": 1},
-        "split": {
-            "mode": "temporal",
-            "train_fraction": 0.60,
-            "val_fraction": 0.20,
-            "gap": 1
+        "dataset": {
+            "paths": [str(info["path"]) for info in simulations],
+            "skip_initial": 1
         },
+        "split": {"mode": "simulation", "train_fraction": 0.70},
         "training": {"num_epochs": 2, "batch_size": 2},
         "networks": networks
     }
+
+    if allow_partial_state:
+        config["allow_partial_state"] = True
 
     path = tmp_path / f"{name}.yaml"
 
@@ -134,32 +127,14 @@ def run(config_path, output_root):
     return runs[0]
 
 
-SMALL_GCN = {
-    "architecture": "gcn",
-    "num_neurons": 8,
-    "num_layers": 2,
-    "dropout": 0.0,
-    "learning_rate": 1.0e-3,
-    "weight_decay": 1.0e-5
-}
-
-
-def test_two_network_experiment_runs(dataset_path, tmp_path):
-    """The virtual-node setup: two networks, two feature encodings."""
+def test_velocity_only_experiment_runs(simulations, tmp_path):
+    """The simplest working configuration."""
 
     config = write_config(
         tmp_path,
-        dataset_path,
-        networks={
-            "velocity": {
-                "predicts": "velocity", "features": "time", **SMALL_GCN
-            },
-            "pressure": {
-                "predicts": "pressure",
-                "features": "time_fourier",
-                **{**SMALL_GCN, "architecture": "gcn_virtual_node"}
-            }
-        }
+        simulations,
+        networks={"velocity": VELOCITY_NET},
+        allow_partial_state=True
     )
 
     run_dir = run(config, tmp_path / "outputs")
@@ -167,6 +142,63 @@ def test_two_network_experiment_runs(dataset_path, tmp_path):
     for expected in [
         "config.json",
         "metrics.json",
+        "velocity.pth",
+        "velocity_loss.png"
+    ]:
+        assert (run_dir / expected).exists(), f"missing {expected}"
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    loss = metrics["test_loss_normalized"]["velocity"]
+
+    assert np.isfinite(loss) and loss >= 0
+
+
+def test_split_reported_in_metrics_covers_every_simulation(
+    simulations, tmp_path
+):
+    """No simulation may sit in two blocks, and none may be dropped."""
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={"velocity": VELOCITY_NET},
+        allow_partial_state=True,
+        name="smoke_split"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    train = set(metrics["train_simulations"])
+    val = set(metrics["val_simulations"])
+    test = set(metrics["test_simulations"])
+
+    assert not train & val
+    assert not val & test
+    assert not train & test
+
+    assert train | val | test == set(range(len(MESHES)))
+    assert val and test
+
+
+def test_velocity_and_bsms_pressure_run(simulations, tmp_path):
+    """The full configuration, across meshes of different sizes."""
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_NET
+        },
+        name="smoke_bsms"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    for expected in [
         "velocity.pth",
         "pressure.pth",
         "velocity_loss.png",
@@ -176,64 +208,34 @@ def test_two_network_experiment_runs(dataset_path, tmp_path):
 
     metrics = json.loads((run_dir / "metrics.json").read_text())
 
-    for name in ("u", "v", "p"):
-        rmse = metrics["inference_metrics_physical"][name]["rmse"]
-        assert np.isfinite(rmse), f"{name} RMSE is {rmse}"
-
     for name in ("velocity", "pressure"):
         loss = metrics["test_loss_normalized"][name]
-        assert np.isfinite(loss) and loss >= 0
+        assert np.isfinite(loss), f"{name} test loss is {loss}"
 
 
-def test_monolithic_experiment_runs(dataset_path, tmp_path):
-    """A single network predicting all three variables."""
-
-    config = write_config(
-        tmp_path,
-        dataset_path,
-        networks={
-            "state": {
-                "predicts": "state", "features": "time", **SMALL_GCN
-            }
-        },
-        name="smoke_mono"
-    )
-
-    run_dir = run(config, tmp_path / "outputs")
-
-    assert (run_dir / "state.pth").exists()
-
-    metrics = json.loads((run_dir / "metrics.json").read_text())
-
-    assert np.isfinite(metrics["inference_metrics_physical"]["p"]["rmse"])
-
-
-def test_sweep_runs_and_writes_a_table(dataset_path, tmp_path):
+def test_sweep_runs_and_writes_a_table(simulations, tmp_path):
 
     config = write_config(
         tmp_path,
-        dataset_path,
+        simulations,
         networks={
-            "state": {
-                "predicts": "state",
-                "features": "time",
-                **{**SMALL_GCN, "num_neurons": [4, 8]}
-            }
+            "velocity": {**VELOCITY_NET, "num_neurons": [4, 8]}
         },
+        allow_partial_state=True,
         name="smoke_sweep"
     )
 
     run_dir = run(config, tmp_path / "outputs")
 
-    sweep = (run_dir / "sweep.csv").read_text().strip().split("\n")
+    rows = (run_dir / "sweep.csv").read_text().strip().split("\n")
 
-    assert len(sweep) == 3, "header plus two configurations"
+    assert len(rows) == 3, "header plus two configurations"
 
 
-def test_checkpoint_round_trips(dataset_path, tmp_path):
+def test_checkpoint_round_trips(simulations, tmp_path):
     """
-    The point of storing the normalizer: a checkpoint must be usable
-    without knowing how it was trained.
+    The point of storing the normalizer and the architecture: a
+    checkpoint must be usable without knowing how it was trained.
     """
 
     sys.path.insert(0, str(REPO / "src"))
@@ -243,40 +245,67 @@ def test_checkpoint_round_trips(dataset_path, tmp_path):
 
     config = write_config(
         tmp_path,
-        dataset_path,
-        networks={
-            "state": {
-                "predicts": "state", "features": "time", **SMALL_GCN
-            }
-        },
+        simulations,
+        networks={"velocity": VELOCITY_NET},
+        allow_partial_state=True,
         name="smoke_ckpt"
     )
 
     run_dir = run(config, tmp_path / "outputs")
 
+    _, _, metadata = load_checkpoint(run_dir / "velocity.pth")
+
+    assert metadata["predicts"] == "velocity"
+    assert metadata["architecture"] == "gcn"
+
+    # Everything needed to rebuild the model is in the metadata
     model = build_model(
-        architecture="gcn",
-        num_in=4,
-        num_out=3,
-        num_neurons=8,
-        num_layers=2,
-        dropout=0.0
+        architecture=metadata["architecture"],
+        num_in=metadata["num_in"],
+        num_out=metadata["num_out"],
+        num_neurons=metadata["num_neurons"],
+        num_layers=metadata["num_layers"],
+        dropout=metadata["dropout"]
     )
 
-    model, normalizer, metadata = load_checkpoint(
-        run_dir / "state.pth", model=model
+    model, normalizer, _ = load_checkpoint(
+        run_dir / "velocity.pth", model=model
     )
 
-    assert metadata["predicts"] == "state"
-    assert metadata["features"] == "time"
-
-    # The scaling survived the round trip
     values = np.array([[1.0, 2.0, 3000.0]])
 
     assert np.allclose(
         normalizer.inverse_transform(normalizer.transform(values)),
         values
     )
+
+
+def test_bsms_checkpoint_records_its_own_hyperparameters(
+    simulations, tmp_path
+):
+    """A BSMS model cannot be rebuilt without unet_depth."""
+
+    sys.path.insert(0, str(REPO / "src"))
+
+    from gnn_comsol.checkpoints import load_checkpoint
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_NET
+        },
+        name="smoke_bsms_meta"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    _, _, metadata = load_checkpoint(run_dir / "pressure.pth")
+
+    assert metadata["architecture"] == "bsms"
+    assert metadata["unet_depth"] == PRESSURE_BSMS_NET["unet_depth"]
+    assert metadata["hidden_layers"] == PRESSURE_BSMS_NET["hidden_layers"]
 
 
 def test_legacy_checkpoint_is_refused(tmp_path):

@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from gnn_comsol.data.loading import RawDataset
-from gnn_comsol.data.splitting import compute_split_indices, split_dataset
+from gnn_comsol.data.splitting import (
+    compute_split_indices,
+    split_dataset,
+    split_simulations
+)
 
 
 def snapshots_touched(indices):
@@ -114,7 +118,8 @@ def test_split_dataset_keeps_x_y_and_dt_aligned():
         edge_index=np.zeros((2, 1), dtype=int),
         edge_weight=np.ones(1),
         delta_t=(t[1:] - t[:-1])[1:],
-        h=np.array(0.0)
+        h=np.array(0.0),
+        pos=np.zeros((N, 2))
     )
 
     # delta_t lines up with X_input index by index
@@ -145,7 +150,8 @@ def test_mismatched_delta_t_is_refused():
         edge_index=np.zeros((2, 1), dtype=int),
         edge_weight=np.ones(1),
         delta_t=np.ones(5),          # wrong length on purpose
-        h=np.array(0.0)
+        h=np.array(0.0),
+        pos=np.zeros((2, 2))
     )
 
     with pytest.raises(ValueError, match="line up"):
@@ -167,3 +173,87 @@ def test_bad_arguments_raise_clearly(kwargs):
 
     with pytest.raises(ValueError):
         compute_split_indices(n_samples, **kwargs)
+
+
+# ---------------------------------------------------------------------
+# Splitting whole simulations
+# ---------------------------------------------------------------------
+
+def fake_simulation(simulation_id, num_samples=5, num_nodes=4):
+    """A RawDataset with just enough shape to be split."""
+
+    return RawDataset(
+        X_input=np.zeros((num_samples, num_nodes, 3)),
+        Y_target=np.zeros((num_samples, num_nodes, 3)),
+        edge_index=np.zeros((2, 1), dtype=int),
+        edge_weight=np.ones(1),
+        delta_t=np.ones(num_samples),
+        h=np.array(0.0),
+        pos=np.zeros((num_nodes, 2)),
+        simulation_id=simulation_id
+    )
+
+
+def test_split_simulations_keeps_every_simulation_whole():
+
+    simulations = [fake_simulation(i) for i in range(6)]
+
+    splits = split_simulations(simulations, train_fraction=0.70)
+
+    ids = {
+        name: {s.simulation_id for s in getattr(splits, name)}
+        for name in ("train", "val", "test")
+    }
+
+    assert not ids["train"] & ids["val"]
+    assert not ids["val"] & ids["test"]
+    assert not ids["train"] & ids["test"]
+
+    # every simulation is used exactly once
+    assert ids["train"] | ids["val"] | ids["test"] == set(range(6))
+    assert sum(len(v) for v in ids.values()) == 6
+
+
+def test_split_simulations_never_leaves_val_or_test_empty():
+    """With 3 simulations there is exactly one for each block."""
+
+    splits = split_simulations(
+        [fake_simulation(i) for i in range(3)],
+        train_fraction=0.99
+    )
+
+    assert len(splits.train) == 1
+    assert len(splits.val) == 1
+    assert len(splits.test) == 1
+
+
+def test_split_simulations_gives_the_odd_one_to_test():
+
+    splits = split_simulations(
+        [fake_simulation(i) for i in range(6)],
+        train_fraction=0.5
+    )
+
+    assert len(splits.train) == 3
+    assert len(splits.val) == 1
+    assert len(splits.test) == 2
+
+
+def test_split_simulations_is_reproducible():
+
+    def ids(seed):
+        splits = split_simulations(
+            [fake_simulation(i) for i in range(6)],
+            train_fraction=0.70,
+            seed=seed
+        )
+        return [s.simulation_id for s in splits.train]
+
+    assert ids(68) == ids(68)
+    assert ids(68) != ids(1)
+
+
+def test_split_simulations_needs_at_least_three():
+
+    with pytest.raises(ValueError, match="At least 3"):
+        split_simulations([fake_simulation(0), fake_simulation(1)])
