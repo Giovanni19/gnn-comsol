@@ -40,7 +40,10 @@ from .splitting import (
     compute_split_indices,
     format_split_statistics,
     split_dataset,
-    split_simulations
+    split_simulations,
+    split_simulations_by_group,
+    split_simulations_by_sample,
+    subset_simulation
 )
 
 
@@ -72,5 +75,8 @@ __all__ = [
     "load_simulations",
     "split_dataset",
     "split_simulations",
+    "split_simulations_by_group",
+    "split_simulations_by_sample",
+    "subset_simulation",
     "to_tensor"
 ]

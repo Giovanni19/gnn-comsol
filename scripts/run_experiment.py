@@ -112,10 +112,27 @@ def create_run_dir(output_root, config):
 # Data
 # =====================================================================
 
+def dataset_paths(config):
+    """
+    The simulations to load, from either dataset.path or dataset.paths.
+
+    load_config guarantees exactly one of the two is present, so a single
+    simulation is just a list of length one and the rest of the pipeline
+    does not need to know the difference.
+    """
+
+    dataset = config["dataset"]
+
+    if dataset.get("paths"):
+        return list(dataset["paths"])
+
+    return [dataset["path"]]
+
+
 def load_and_report_simulations(config):
 
     simulations = gdata.load_simulations(
-        config["dataset"]["paths"],
+        dataset_paths(config),
         skip_initial=config["dataset"]["skip_initial"]
     )
 
@@ -152,20 +169,73 @@ def load_and_report_simulations(config):
 
 
 def split_and_report(simulations, config):
+    """
+    Apply the split the configuration asked for.
 
-    splits = gdata.split_simulations(
-        simulations,
-        train_fraction=config["split"]["train_fraction"],
-        seed=config["seed"]
-    )
+    split.mode used to be validated and then ignored: whatever it said,
+    whole simulations were split. The four modes now do different things,
+    and the difference is the question being asked.
 
-    print("\nSimulation split:")
+        simulation / group
+            Whole simulations, so a block never shares a geometry with
+            another. Measures generalisation to an UNSEEN GEOMETRY.
+            "simulation" gives train_fraction to training and halves the
+            rest; "group" follows train_fraction and val_fraction.
+
+        temporal / random
+            Every simulation is cut along its own samples and contributes
+            a slice to each block. Measures EXTRAPOLATION IN TIME, with
+            every geometry seen during training. "temporal" uses
+            contiguous blocks plus a gap, "random" is the legacy shuffled
+            split kept only for comparison.
+    """
+
+    split = config["split"]
+
+    mode = split["mode"]
+
+    if mode == "simulation":
+
+        splits = gdata.split_simulations(
+            simulations,
+            train_fraction=split["train_fraction"],
+            seed=config["seed"]
+        )
+
+    elif mode == "group":
+
+        splits = gdata.split_simulations_by_group(
+            simulations,
+            train_fraction=split["train_fraction"],
+            val_fraction=split["val_fraction"],
+            seed=config["seed"]
+        )
+
+    else:
+
+        splits = gdata.split_simulations_by_sample(
+            simulations,
+            mode=mode,
+            train_fraction=split["train_fraction"],
+            val_fraction=split["val_fraction"],
+            gap=split["gap"],
+            seed=config["seed"]
+        )
+
+    print(f"\nSplit ({mode}):")
 
     for name in ("train", "val", "test"):
 
         block = getattr(splits, name)
 
-        print(f"\n{name.upper()} ({len(block)} simulations)")
+        samples = sum(
+            simulation.num_samples for simulation in block
+        )
+
+        print(
+            f"\n{name.upper()} "
+            f"({len(block)} simulation(s), {samples} samples)"
+        )
 
         for simulation in block:
 
@@ -901,8 +971,14 @@ def train_all_networks(
 
 def write_outputs(run_dir, config, splits, trained, sweep_rows):
 
+    # Which simulations feed each block. With a whole-simulation split
+    # the three lists are disjoint; with a temporal or random one every
+    # simulation appears in all three, because it was cut along its own
+    # samples. split_mode is recorded so the lists can be read correctly.
     results = {
         "experiment": config["name"],
+
+        "split_mode": config["split"]["mode"],
 
         "train_simulations": [
             sim.simulation_id for sim in splits.train
@@ -915,6 +991,14 @@ def write_outputs(run_dir, config, splits, trained, sweep_rows):
         "test_simulations": [
             sim.simulation_id for sim in splits.test
         ],
+
+        "samples": {
+            name: sum(
+                sim.num_samples
+                for sim in getattr(splits, name)
+            )
+            for name in ("train", "val", "test")
+        },
 
         "test_loss_normalized": {
             name: spec["test_loss"]

@@ -7,7 +7,10 @@ from gnn_comsol.data.loading import RawDataset
 from gnn_comsol.data.splitting import (
     compute_split_indices,
     split_dataset,
-    split_simulations
+    split_simulations,
+    split_simulations_by_group,
+    split_simulations_by_sample,
+    subset_simulation
 )
 
 
@@ -257,3 +260,138 @@ def test_split_simulations_needs_at_least_three():
 
     with pytest.raises(ValueError, match="At least 3"):
         split_simulations([fake_simulation(0), fake_simulation(1)])
+
+
+# ---------------------------------------------------------------------
+# Splitting several simulations along their own samples
+# ---------------------------------------------------------------------
+
+def traceable_simulation(simulation_id, num_samples=20, num_nodes=4):
+    """
+    A RawDataset whose sample i is filled with the value i.
+
+    That makes it possible to say which original samples ended up in
+    which block, which a block of zeros would not.
+    """
+
+    marker = np.arange(num_samples, dtype=float)
+
+    simulation = fake_simulation(
+        simulation_id,
+        num_samples=num_samples,
+        num_nodes=num_nodes
+    )
+
+    simulation.X_input[:] = marker[:, None, None]
+    simulation.Y_target[:] = marker[:, None, None] + 0.5
+    simulation.delta_t = marker
+
+    return simulation
+
+
+def markers(block_simulation):
+    """The original sample indices a block simulation is carrying."""
+
+    return [int(value) for value in block_simulation.delta_t]
+
+
+def test_subset_simulation_keeps_x_y_and_dt_aligned():
+
+    simulation = traceable_simulation(0)
+
+    subset = subset_simulation(simulation, [3, 7, 11])
+
+    assert markers(subset) == [3, 7, 11]
+    assert list(subset.X_input[:, 0, 0]) == [3.0, 7.0, 11.0]
+    assert list(subset.Y_target[:, 0, 0]) == [3.5, 7.5, 11.5]
+
+    # the mesh belongs to the geometry, not to the samples
+    assert subset.edge_index is simulation.edge_index
+    assert subset.pos is simulation.pos
+    assert subset.simulation_id == simulation.simulation_id
+
+
+def test_split_simulations_by_sample_cuts_inside_every_simulation():
+    """
+    The point of "temporal" with several geometries: each one is cut
+    along its own time axis, so every geometry is seen in training and
+    what is measured is extrapolation in time.
+    """
+
+    simulations = [traceable_simulation(i) for i in range(3)]
+
+    splits = split_simulations_by_sample(
+        simulations,
+        mode="temporal",
+        train_fraction=0.60,
+        val_fraction=0.20,
+        gap=1
+    )
+
+    for name in ("train", "val", "test"):
+        assert len(getattr(splits, name)) == 3
+
+    for position in range(3):
+
+        train = markers(splits.train[position])
+        val = markers(splits.val[position])
+        test = markers(splits.test[position])
+
+        assert train and val and test
+
+        # no sample in two blocks
+        assert not set(train) & set(val)
+        assert not set(val) & set(test)
+        assert not set(train) & set(test)
+
+        # contiguous and ordered, with the gap between the blocks
+        assert train == list(range(len(train)))
+        assert max(train) + 1 < min(val)
+        assert max(val) + 1 < min(test)
+
+        # the mesh is the one of the simulation it came from
+        assert splits.train[position].simulation_id == position
+        assert (
+            splits.test[position].edge_index
+            is simulations[position].edge_index
+        )
+
+
+def test_split_simulations_by_sample_refuses_whole_simulation_modes():
+    """
+    Splitting by sample cannot express "hold this geometry out": asking
+    for it must fail rather than quietly do something else.
+    """
+
+    simulations = [traceable_simulation(i) for i in range(3)]
+
+    for mode in ("simulation", "group"):
+        with pytest.raises(ValueError, match="does not handle"):
+            split_simulations_by_sample(simulations, mode=mode)
+
+
+def test_split_simulations_by_group_keeps_simulations_whole():
+
+    simulations = [fake_simulation(i) for i in range(6)]
+
+    splits = split_simulations_by_group(
+        simulations,
+        train_fraction=0.50,
+        val_fraction=0.25
+    )
+
+    ids = {
+        name: {s.simulation_id for s in getattr(splits, name)}
+        for name in ("train", "val", "test")
+    }
+
+    assert not ids["train"] & ids["val"]
+    assert not ids["val"] & ids["test"]
+    assert not ids["train"] & ids["test"]
+
+    assert ids["train"] | ids["val"] | ids["test"] == set(range(6))
+
+    # unlike split_simulations, val_fraction is honoured too
+    assert len(splits.train) == 3
+    assert len(splits.val) == 1
+    assert len(splits.test) == 2

@@ -8,7 +8,7 @@ over-optimistic error: on this dataset the nearest training neighbour of
 a test sample was one single snapshot away.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -414,4 +414,133 @@ def split_simulations(
         train=train,
         val=val,
         test=test,
+    )
+
+
+def subset_simulation(simulation, indices):
+    """
+    One simulation restricted to a subset of its samples.
+
+    The mesh is shared, not copied: edge_index, edge_weight and pos are
+    properties of the geometry and do not depend on which samples are
+    kept.
+    """
+
+    indices = np.asarray(indices, dtype=np.int64)
+
+    return replace(
+        simulation,
+        X_input=simulation.X_input[indices],
+        Y_target=simulation.Y_target[indices],
+        delta_t=simulation.delta_t[indices],
+    )
+
+
+def split_simulations_by_sample(
+    simulations,
+    mode="temporal",
+    train_fraction=0.70,
+    val_fraction=0.15,
+    gap=1,
+    seed=68,
+):
+    """
+    Split every simulation along its own samples, then collect the blocks.
+
+    This is the "temporal" and "random" behaviour, generalised to more
+    than one simulation: each simulation is cut independently and
+    contributes its own slice to each of the three blocks. With a single
+    simulation it is exactly the original behaviour.
+
+    Note that this is NOT the same question as split_simulations: here
+    every geometry is seen during training, and what is measured is
+    extrapolation in time. Use mode="simulation" to measure
+    generalisation to an unseen geometry instead.
+
+    Returns
+    -------
+    SimulationSplits
+        Each block is a list of RawDataset, one per input simulation,
+        sharing the mesh of the simulation it came from.
+    """
+
+    if mode not in ("temporal", "random"):
+        raise ValueError(
+            f"split_simulations_by_sample does not handle mode={mode!r}. "
+            "Expected 'temporal' or 'random'; whole-simulation modes are "
+            "split_simulations and split_simulations_by_group."
+        )
+
+    if not simulations:
+        raise ValueError("At least one simulation is required.")
+
+    train, val, test = [], [], []
+
+    for simulation in simulations:
+
+        n_samples = simulation.num_samples
+
+        # Same guard as split_dataset: a mismatch here would silently
+        # shift the time step of every sample.
+        if len(simulation.delta_t) != n_samples:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id}: delta_t has "
+                f"{len(simulation.delta_t)} entries but there are "
+                f"{n_samples} samples: they must line up index by index."
+            )
+
+        train_indices, val_indices, test_indices = compute_split_indices(
+            n_samples,
+            mode=mode,
+            train_fraction=train_fraction,
+            val_fraction=val_fraction,
+            gap=gap,
+            seed=seed,
+        )
+
+        train.append(subset_simulation(simulation, train_indices))
+        val.append(subset_simulation(simulation, val_indices))
+        test.append(subset_simulation(simulation, test_indices))
+
+    return SimulationSplits(train=train, val=val, test=test)
+
+
+def split_simulations_by_group(
+    simulations,
+    train_fraction=0.70,
+    val_fraction=0.15,
+    seed=68,
+):
+    """
+    Whole simulations, allocated by fraction.
+
+    Same guarantee as split_simulations - no simulation appears in more
+    than one block - but the sizes follow train_fraction AND
+    val_fraction, instead of giving validation and test half of the
+    remainder each. It reuses compute_split_indices(mode="group"), which
+    is the tested implementation of that allocation.
+
+    Needs at least three simulations.
+    """
+
+    n_simulations = len(simulations)
+
+    groups = np.arange(n_simulations)
+
+    train_indices, val_indices, test_indices = compute_split_indices(
+        n_simulations,
+        mode="group",
+        train_fraction=train_fraction,
+        val_fraction=val_fraction,
+        groups=groups,
+        seed=seed,
+    )
+
+    def block(indices):
+        return [simulations[index] for index in indices]
+
+    return SimulationSplits(
+        train=block(train_indices),
+        val=block(val_indices),
+        test=block(test_indices),
     )

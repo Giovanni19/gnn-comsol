@@ -70,17 +70,19 @@ def write_config(
     simulations,
     networks,
     name="smoke",
-    allow_partial_state=False
+    allow_partial_state=False,
+    dataset=None,
+    split=None
 ):
 
     config = {
         "name": name,
         "seed": 68,
-        "dataset": {
+        "dataset": dataset or {
             "paths": [str(info["path"]) for info in simulations],
             "skip_initial": 1
         },
-        "split": {"mode": "simulation", "train_fraction": 0.70},
+        "split": split or {"mode": "simulation", "train_fraction": 0.70},
         "training": {"num_epochs": 2, "batch_size": 2},
         "networks": networks
     }
@@ -181,6 +183,123 @@ def test_split_reported_in_metrics_covers_every_simulation(
 
     assert train | val | test == set(range(len(MESHES)))
     assert val and test
+
+
+TEMPORAL_SPLIT = {
+    "mode": "temporal",
+    "train_fraction": 0.60,
+    "val_fraction": 0.20,
+    "gap": 1
+}
+
+
+def test_single_simulation_config_runs(simulations, tmp_path):
+    """
+    A config with dataset.path (singular), the way the first three
+    experiments are written.
+
+    The multi-geometry work made the runner read dataset.paths
+    unconditionally and always split whole simulations, so every
+    single-simulation config died with KeyError: 'paths' - including the
+    command in the README. Nothing executed that path from the entry
+    point, which is exactly why it went unnoticed.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={"velocity": VELOCITY_NET},
+        allow_partial_state=True,
+        name="smoke_single",
+        dataset={
+            "path": str(simulations[0]["path"]),
+            "skip_initial": 1
+        },
+        split=TEMPORAL_SPLIT
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    assert metrics["split_mode"] == "temporal"
+
+    # One simulation, cut in three along its own samples
+    assert metrics["train_simulations"] == [0]
+    assert metrics["val_simulations"] == [0]
+    assert metrics["test_simulations"] == [0]
+
+    for block in ("train", "val", "test"):
+        assert metrics["samples"][block] > 0, f"{block} block is empty"
+
+    loss = metrics["test_loss_normalized"]["velocity"]
+
+    assert np.isfinite(loss) and loss >= 0
+
+
+def test_split_mode_is_respected(simulations, tmp_path):
+    """
+    split.mode used to be validated and then ignored.
+
+    The two modes ask different questions and must therefore produce
+    different splits: "simulation" holds whole geometries out, so the
+    blocks are disjoint; "temporal" cuts inside every simulation, so
+    every geometry appears in all three blocks.
+    """
+
+    all_ids = set(range(len(MESHES)))
+
+    temporal = json.loads(
+        (
+            run(
+                write_config(
+                    tmp_path,
+                    simulations,
+                    networks={"velocity": VELOCITY_NET},
+                    allow_partial_state=True,
+                    name="smoke_temporal",
+                    split=TEMPORAL_SPLIT
+                ),
+                tmp_path / "outputs_temporal"
+            ) / "metrics.json"
+        ).read_text()
+    )
+
+    by_simulation = json.loads(
+        (
+            run(
+                write_config(
+                    tmp_path,
+                    simulations,
+                    networks={"velocity": VELOCITY_NET},
+                    allow_partial_state=True,
+                    name="smoke_by_simulation",
+                    split={"mode": "simulation", "train_fraction": 0.70}
+                ),
+                tmp_path / "outputs_by_simulation"
+            ) / "metrics.json"
+        ).read_text()
+    )
+
+    assert temporal["split_mode"] == "temporal"
+
+    for block in ("train_simulations", "val_simulations",
+                  "test_simulations"):
+        assert set(temporal[block]) == all_ids, (
+            f"a temporal split must cut inside every simulation, "
+            f"but {block} is {temporal[block]}"
+        )
+
+    assert by_simulation["split_mode"] == "simulation"
+
+    train = set(by_simulation["train_simulations"])
+    val = set(by_simulation["val_simulations"])
+    test = set(by_simulation["test_simulations"])
+
+    assert not train & val
+    assert not train & test
+    assert not val & test
+    assert train | val | test == all_ids
 
 
 def test_velocity_and_bsms_pressure_run(simulations, tmp_path):

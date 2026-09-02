@@ -11,13 +11,15 @@ Schema
 name: str
 seed: int
 dataset:
-  path: str
+  path: str              # one simulation
+  paths: [str, ...]      # or several; exactly one of the two
   skip_initial: int      # snapshots dropped from the start
 split:
-  mode: temporal | group | random
+  mode: temporal | group | random | simulation
   train_fraction: float
-  val_fraction: float
-  gap: int
+  val_fraction: float    # ignored by "simulation"
+  gap: int               # "temporal" only
+allow_partial_state: bool   # let the networks cover only part of u,v,p
 training:
   num_epochs: int
   batch_size: int
@@ -164,13 +166,25 @@ def _validate(config, path):
             f"{path}: unknown split mode {mode!r}. "
             "Expected 'temporal', 'group', 'random' or 'simulation'."
         )
-    if mode == "simulation":
+    # Both modes keep whole simulations together, so a block can only be
+    # non-empty if there are at least three of them. Checking it here
+    # fails before the .mat files are read rather than after.
+    if mode in ("simulation", "group"):
 
         if not has_paths:
             raise ValueError(
-                f"{path}: split mode 'simulation' requires "
+                f"{path}: split mode {mode!r} requires "
                 "'dataset.paths' with multiple simulations."
             )
+
+        if len(dataset["paths"]) < 3:
+            raise ValueError(
+                f"{path}: split mode {mode!r} keeps whole simulations "
+                "together, so it needs at least 3 of them; "
+                f"'dataset.paths' lists {len(dataset['paths'])}."
+            )
+
+    if mode == "simulation":
 
         train_fraction = config["split"].get("train_fraction")
 
