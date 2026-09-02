@@ -365,7 +365,7 @@ def evaluate_bsms_multi_simulation(
 
             pos = hierarchy["pos"].to(device)
 
-            for X, Y in loader:
+            for X, Y, _ in loader:
 
                 X = X.to(device)
                 Y = Y.to(device)

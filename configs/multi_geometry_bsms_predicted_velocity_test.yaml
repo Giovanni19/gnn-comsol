@@ -1,0 +1,123 @@
+name: multi_geometry_bsms_predicted_velocity_test
+
+seed: 68
+
+
+# ============================================================
+# DATASET
+# ============================================================
+
+dataset:
+
+  paths:
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_backstep_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_circular_cavity_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_elliptic_cavity_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_square_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_thin_gnn_dataset.mat
+
+  # Keep the initial transient for this experiment.
+  skip_initial: 0
+
+
+# ============================================================
+# SPLIT BY SIMULATION
+# ============================================================
+
+split:
+
+  mode: simulation
+
+  train_fraction: 0.70
+
+
+# ============================================================
+# TRAINING
+# ============================================================
+
+training:
+
+  # Smoke test first.
+  num_epochs: 3
+
+  # Known to fit safely on the 29k-node mesh.
+  batch_size: 2
+
+
+# ============================================================
+# NETWORKS
+# ============================================================
+
+networks:
+
+  # ----------------------------------------------------------
+  # VELOCITY
+  #
+  # Input:
+  #   u(t)
+  #   v(t)
+  #   p(t)
+  #   delta_t
+  #
+  # Output:
+  #   u_hat(t+1)
+  #   v_hat(t+1)
+  # ----------------------------------------------------------
+
+  velocity:
+
+    predicts: velocity
+
+    features: time
+
+    architecture: gcn
+
+    num_neurons: 64
+    num_layers: 3
+
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+
+  # ----------------------------------------------------------
+  # PRESSURE
+  #
+  # Input:
+  #   u(t)
+  #   v(t)
+  #   p(t)
+  #   delta_t
+  #   u_hat(t+1)
+  #   v_hat(t+1)
+  #
+  # Output:
+  #   p_hat(t+1)
+  # ----------------------------------------------------------
+
+  pressure:
+
+    predicts: pressure
+
+    features: time
+
+    architecture: bsms
+
+    # IMPORTANT:
+    # Add the velocity predictions produced by the trained
+    # velocity GCN as pressure input features.
+    use_predicted_velocity: true
+
+    num_neurons: 64
+
+    unet_depth: 5
+    hidden_layers: 2
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3
+
+    # Required by the common configuration schema.
+    num_layers: 1
+    dropout: 0.0

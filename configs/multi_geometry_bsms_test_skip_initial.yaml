@@ -1,0 +1,51 @@
+name: multi_geometry_bsms_test_skip_initial
+
+seed: 68
+
+dataset:
+  paths:
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_backstep_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_circular_cavity_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_elliptic_cavity_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_square_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_thin_gnn_dataset.mat
+
+  skip_initial: 20
+
+split:
+  mode: simulation
+  train_fraction: 0.70
+
+training:
+  num_epochs: 5
+  batch_size: 1
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure
+    features: time
+    architecture: bsms
+
+    num_neurons: 64
+    unet_depth: 5
+    hidden_layers: 2
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3
+
+    num_layers: 1
+    dropout: 0.0

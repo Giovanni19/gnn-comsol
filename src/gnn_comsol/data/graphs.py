@@ -51,21 +51,56 @@ def create_graph_dataset(X, Y, edge_index, edge_weight, simulation_id=None):
 
 
 
-def create_bsms_dataset(X, Y):
+def create_bsms_dataset(X, Y, delta_t=None):
     """
     Build a dataset for BSMS models.
 
     Unlike the standard PyG graph dataset, the mesh topology is not
-    duplicated for every snapshot. Each item contains only the node
-    features and target.
+    duplicated for every snapshot.
 
-    The fixed BSMS hierarchy and mesh positions are stored by the model.
+    Parameters
+    ----------
+    X : array or tensor
+        Node features.
+
+    Y : array or tensor
+        Target state.
+
+    delta_t : array or tensor, optional
+        Physical timestep associated with each transition.
+
+        When provided, each dataset item is:
+            (X, Y, delta_t)
+
+        This physical delta_t can be used by timestep-weighted losses.
+
+        When omitted, each dataset item remains:
+            (X, Y)
     """
 
     X = X if isinstance(X, torch.Tensor) else to_tensor(X)
     Y = Y if isinstance(Y, torch.Tensor) else to_tensor(Y)
 
-    return TensorDataset(X, Y)
+    if delta_t is None:
+        return TensorDataset(X, Y)
+
+    delta_t = (
+        delta_t
+        if isinstance(delta_t, torch.Tensor)
+        else to_tensor(delta_t)
+    )
+
+    if len(delta_t) != len(X):
+        raise ValueError(
+            f"delta_t has {len(delta_t)} samples, "
+            f"but X has {len(X)}."
+        )
+
+    return TensorDataset(
+        X,
+        Y,
+        delta_t,
+    )
 
 def create_multi_simulation_graph_dataset(
     simulations,

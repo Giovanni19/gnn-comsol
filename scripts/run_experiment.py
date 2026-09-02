@@ -325,6 +325,72 @@ def build_bsms_hierarchies(simulations, config):
 
     return bsms_hierarchies
 
+def predict_velocity_for_simulation(
+    velocity_model,
+    simulation,
+    velocity_encoding,
+    device,
+):
+    """
+    Predict normalized u(t+1), v(t+1) for every sample
+    of one normalized simulation.
+
+    Returns
+    -------
+    predictions : np.ndarray
+        Shape (S, N, 2), still in normalized units.
+    """
+
+    features = gdata.build_features(
+        velocity_encoding,
+        simulation["X"],
+        simulation["dt"],
+    )
+
+    edge_index = torch.as_tensor(
+        simulation["edge_index"],
+        dtype=torch.long,
+        device=device,
+    )
+
+    edge_weight = torch.as_tensor(
+        simulation["edge_weight"],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    predictions = []
+
+    velocity_model.eval()
+
+    with torch.no_grad():
+
+        for timestep in range(features.shape[0]):
+
+            x = torch.as_tensor(
+                features[timestep],
+                dtype=torch.float32,
+                device=device,
+            )
+
+            from torch_geometric.data import Data
+
+            graph = Data(
+                x=x,
+                edge_index=edge_index,
+                edge_weight=edge_weight,
+            )
+
+            prediction = velocity_model(graph)
+
+            predictions.append(
+                prediction.cpu().numpy()
+            )
+
+    return np.stack(
+        predictions,
+        axis=0,
+    )
 
 # =====================================================================
 # Loaders
@@ -365,24 +431,72 @@ def build_velocity_loaders(normalized, config):
     return velocity_loaders
 
 
-def build_pressure_loaders(normalized, config):
-    """One loader per simulation, keyed by simulation id."""
+def build_pressure_loaders(
+    normalized,
+    config,
+    velocity_model=None,
+    device=None,
+):
+    """
+    One BSMS loader per simulation.
 
-    pressure_loaders = {"train": {}, "val": {}, "test": {}}
+    If use_predicted_velocity=True, normalized predictions
+    u(t+1), v(t+1) from the trained velocity network are
+    concatenated to the base pressure features.
+    """
+
+    pressure_loaders = {
+        "train": {},
+        "val": {},
+        "test": {},
+    }
 
     if not uses_bsms(config):
         return pressure_loaders
 
     pressure_network = config["networks"]["pressure"]
-    pressure_encoding = pressure_network["features"]
+
+    pressure_encoding = pressure_network[
+        "features"
+    ]
+
+    use_predicted_velocity = pressure_network.get(
+        "use_predicted_velocity",
+        False,
+    )
 
     batch_size = config["training"]["batch_size"]
+
+    if use_predicted_velocity:
+
+        if velocity_model is None:
+            raise ValueError(
+                "Pressure uses predicted velocity, but no "
+                "trained velocity model was provided."
+            )
+
+        if device is None:
+            raise ValueError(
+                "device is required when predicted velocity "
+                "features are enabled."
+            )
+
+        velocity_encoding = config[
+            "networks"
+        ]["velocity"]["features"]
 
     for split_name in ("train", "val", "test"):
 
         for simulation in normalized[split_name]:
 
-            simulation_id = simulation["simulation_id"]
+            simulation_id = simulation[
+                "simulation_id"
+            ]
+
+            # -----------------------------------------------
+            # Base features:
+            # u(t), v(t), p(t), delta_t
+            # -----------------------------------------------
 
             features = gdata.build_features(
                 pressure_encoding,
@@ -390,24 +504,66 @@ def build_pressure_loaders(normalized, config):
                 simulation["dt"],
             )
 
+            # -----------------------------------------------
+            # Add predicted u(t+1), v(t+1)
+            # -----------------------------------------------
+
+            if use_predicted_velocity:
+
+                predicted_velocity = (
+                    predict_velocity_for_simulation(
+                        velocity_model,
+                        simulation,
+                        velocity_encoding,
+                        device,
+                    )
+                )
+
+                if (
+                    predicted_velocity.shape[:2]
+                    != features.shape[:2]
+                ):
+                    raise ValueError(
+                        f"Simulation {simulation_id}: "
+                        "predicted velocity and pressure "
+                        "features have incompatible shapes."
+                    )
+
+                features = np.concatenate(
+                    [
+                        features,
+                        predicted_velocity,
+                    ],
+                    axis=-1,
+                )
+
             pressure_dataset = gdata.create_bsms_dataset(
                 features,
                 simulation["Y"],
+                delta_t=simulation["dt_physical"],
             )
 
-            pressure_loaders[split_name][simulation_id] = (
-                TensorDataLoader(
-                    pressure_dataset,
-                    batch_size=batch_size,
-                    shuffle=(split_name == "train"),
-                )
+            sample = pressure_dataset[0]
+
+            print(
+                f"DEBUG | simulation {simulation_id} | "
+                f"items={len(sample)}"
+            )
+
+            pressure_loaders[
+                split_name
+            ][simulation_id] = TensorDataLoader(
+                pressure_dataset,
+                batch_size=batch_size,
+                shuffle=(split_name == "train"),
             )
 
             print(
                 f"Pressure {split_name} | "
                 f"simulation {simulation_id}: "
                 f"{len(pressure_dataset)} samples | "
-                f"{simulation['X'].shape[1]} nodes"
+                f"{simulation['X'].shape[1]} nodes | "
+                f"{features.shape[-1]} features"
             )
 
     return pressure_loaders
@@ -449,7 +605,15 @@ def train_one_network(
 
     columns = gdata.TARGET_COLUMNS[network["predicts"]]
 
-    num_in = gdata.FEATURE_SIZES[network["features"]]
+    num_in = gdata.FEATURE_SIZES[
+        network["features"]
+    ]
+
+    if network.get(
+        "use_predicted_velocity",
+        False,
+    ):
+        num_in += 2
 
     num_out = len(range(*columns.indices(3)))
 
@@ -576,29 +740,61 @@ def train_one_network(
 
 def train_all_networks(
     config,
+    normalized,
     velocity_loaders,
-    pressure_loaders,
     bsms_hierarchies,
     normalizer,
     run_dir,
     criterion,
     device,
-    verbose
+    verbose,
 ):
     """Train every network in the config, save it, and score it."""
 
     trained = {}
     sweep_rows = []
-
+    pressure_loaders = None
     for network_name, network in config["networks"].items():
 
         architecture = network["architecture"]
 
-        network_loaders = (
-            pressure_loaders
-            if architecture == "bsms"
-            else velocity_loaders
-        )
+        if architecture == "bsms":
+
+            if network.get(
+                "use_predicted_velocity",
+                False,
+            ):
+
+                if "velocity" not in trained:
+                    raise RuntimeError(
+                        "Pressure requires predicted velocity, "
+                        "so the velocity network must be trained first."
+                    )
+
+                print(
+                    "\nGenerating predicted velocity "
+                    "features for pressure..."
+                )
+
+                pressure_loaders = build_pressure_loaders(
+                    normalized,
+                    config,
+                    velocity_model=trained["velocity"]["model"],
+                    device=device,
+                )
+
+            else:
+
+                pressure_loaders = build_pressure_loaders(
+                    normalized,
+                    config,
+                )
+
+            network_loaders = pressure_loaders
+
+        else:
+
+            network_loaders = velocity_loaders
 
         best, rows = train_one_network(
             network_name,
@@ -779,18 +975,18 @@ def main():
     bsms_hierarchies = build_bsms_hierarchies(simulations, config)
 
     velocity_loaders = build_velocity_loaders(normalized, config)
-    pressure_loaders = build_pressure_loaders(normalized, config)
+    
 
     trained, sweep_rows = train_all_networks(
-        config,
-        velocity_loaders,
-        pressure_loaders,
-        bsms_hierarchies,
-        normalizer,
-        run_dir,
-        nn.HuberLoss(delta=1.0),
-        device,
-        verbose=not args.quiet
+    config,
+    normalized,
+    velocity_loaders,
+    bsms_hierarchies,
+    normalizer,
+    run_dir,
+    nn.MSELoss(),
+    device,
+    verbose=not args.quiet,
     )
 
     # NOTE: one-step inference in physical units used to run here, and

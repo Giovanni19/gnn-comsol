@@ -387,6 +387,14 @@ def normalize_simulation(
 ):
     """
     Normalize one complete simulation while preserving its mesh.
+
+    dt:
+        Normalized timestep used as an input feature by the network.
+
+    dt_physical:
+        Original physical timestep. It is kept separately so that
+        timestep-dependent training losses can use the real delta_t
+        without reconstructing it from the normalized value.
     """
 
     return {
@@ -398,9 +406,13 @@ def normalize_simulation(
             simulation.Y_target
         ),
 
+        # Normalized delta_t -> network input
         "dt": (
             simulation.delta_t - dt_mean
         ) / dt_std,
+
+        # Physical delta_t -> weighted loss
+        "dt_physical": simulation.delta_t,
 
         "edge_index": simulation.edge_index,
         "edge_weight": simulation.edge_weight,
