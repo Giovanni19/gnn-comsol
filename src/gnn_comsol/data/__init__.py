@@ -30,7 +30,11 @@ from .normalization import (
     StateNormalizer,
     compute_normalization_parameters,
     compute_multi_simulation_normalization_parameters,
-    normalize_simulation
+    normalize_simulation,
+    PHYSICS_FEATURE_NAMES,
+    NUM_PHYSICS_FEATURES,
+    PhysicsNormalizer,
+    compute_physics_normalization_parameters
 )
 
 from .splitting import (
@@ -78,5 +82,9 @@ __all__ = [
     "split_simulations_by_group",
     "split_simulations_by_sample",
     "subset_simulation",
-    "to_tensor"
+    "to_tensor",
+    "NUM_PHYSICS_FEATURES",
+    "PHYSICS_FEATURE_NAMES",
+    "PhysicsNormalizer",
+    "compute_physics_normalization_parameters",
 ]

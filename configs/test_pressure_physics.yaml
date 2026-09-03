@@ -1,0 +1,50 @@
+name: test_pressure_physics
+
+seed: 68
+
+dataset:
+  path: C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_physics_variables_gnn_dataset.mat
+  skip_initial: 0
+
+split:
+  mode: temporal
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  num_epochs: 5
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 0.0
+
+
+  pressure:
+    predicts: pressure
+    features: time
+    architecture: bsms
+
+    # Manteniamo anche u_pred(t+1), v_pred(t+1)
+    use_predicted_velocity: true
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 0.0
+
+    unet_depth: 3
+    hidden_layers: 2

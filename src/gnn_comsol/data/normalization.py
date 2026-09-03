@@ -25,7 +25,15 @@ PRESSURE_COLUMNS = slice(2, 3)
 STATE_COLUMNS = slice(0, 3)
 
 VARIABLE_NAMES = ["u", "v", "p"]
+PHYSICS_FEATURE_NAMES = [
+    "du_dx",
+    "du_dy",
+    "dv_dx",
+    "dv_dy",
+    "div_conv",
+]
 
+NUM_PHYSICS_FEATURES = len(PHYSICS_FEATURE_NAMES)
 # Which columns of the target a network is responsible for
 TARGET_COLUMNS = {
     "velocity": VELOCITY_COLUMNS,
@@ -64,6 +72,65 @@ def compute_normalization_parameters(X_train, dt_train):
     x_std = np.array([velocity_std, velocity_std, pressure_std])
 
     return x_mean, x_std, delta_t_mean, delta_t_std
+
+def compute_physics_normalization_parameters(
+    physics_features_train,
+):
+    """
+    Compute mean and standard deviation of the physics-derived
+    node features using TRAINING DATA ONLY.
+
+    Parameters
+    ----------
+    physics_features_train : ndarray
+        Shape (S, N, F), where currently:
+
+        F = 5
+
+        0 -> du/dx
+        1 -> du/dy
+        2 -> dv/dx
+        3 -> dv/dy
+        4 -> div[(u . grad)u]
+
+    Returns
+    -------
+    mean : ndarray, shape (F,)
+    std : ndarray, shape (F,)
+    """
+
+    physics_features_train = np.asarray(
+        physics_features_train,
+        dtype=np.float64,
+    )
+
+    if physics_features_train.ndim != 3:
+        raise ValueError(
+            "physics_features_train must have shape "
+            "(samples, nodes, features), got "
+            f"{physics_features_train.shape}."
+        )
+
+    if physics_features_train.shape[-1] != NUM_PHYSICS_FEATURES:
+        raise ValueError(
+            f"Expected {NUM_PHYSICS_FEATURES} physics features, "
+            f"got {physics_features_train.shape[-1]}."
+        )
+
+    if not np.all(np.isfinite(physics_features_train)):
+        raise ValueError(
+            "physics_features_train contains NaN or Inf."
+        )
+
+    mean = physics_features_train.mean(
+        axis=(0, 1)
+    )
+
+    std = physics_features_train.std(
+        axis=(0, 1)
+    ) + 1e-8
+
+    return mean, std
 
 def compute_multi_simulation_normalization_parameters(train_simulations):
     """
@@ -375,6 +442,120 @@ class StateNormalizer:
 
         return (
             f"StateNormalizer(kind='{self.KIND}', "
+            f"mean={np.array2string(self.mean, precision=4)}, "
+            f"std={np.array2string(self.std, precision=4)})"
+        )
+
+
+class PhysicsNormalizer:
+    """
+    Standardization of physics-derived node features.
+
+    Each physics feature is normalized independently:
+
+        x_norm = (x - mean) / std
+
+    Parameters must always be computed on TRAINING DATA ONLY.
+    """
+
+    KIND = "physics_standardize"
+
+    def __init__(self, mean, std):
+
+        self.mean = np.asarray(
+            mean,
+            dtype=np.float64,
+        )
+
+        self.std = np.asarray(
+            std,
+            dtype=np.float64,
+        )
+
+        if self.mean.shape != self.std.shape:
+            raise ValueError(
+                f"mean {self.mean.shape} and "
+                f"std {self.std.shape} "
+                "must have the same shape."
+            )
+
+        if self.mean.shape != (NUM_PHYSICS_FEATURES,):
+            raise ValueError(
+                f"Expected {NUM_PHYSICS_FEATURES} "
+                "physics normalization parameters, "
+                f"got {self.mean.shape}."
+            )
+
+        if np.any(self.std <= 0):
+            raise ValueError(
+                "std must be strictly positive, "
+                f"got {self.std}."
+            )
+
+    def transform(self, values):
+        """
+        Physical physics features -> normalized features.
+        """
+
+        return (
+            values
+            - self._as_like(self.mean, values)
+        ) / self._as_like(self.std, values)
+
+    def inverse_transform(self, values):
+        """
+        Normalized physics features -> physical units.
+        """
+
+        return (
+            values
+            * self._as_like(self.std, values)
+            + self._as_like(self.mean, values)
+        )
+
+    @staticmethod
+    def _as_like(parameters, values):
+
+        if isinstance(values, torch.Tensor):
+
+            return torch.as_tensor(
+                parameters,
+                dtype=values.dtype,
+                device=values.device,
+            )
+
+        return parameters
+
+    def to_dict(self):
+
+        return {
+            "kind": self.KIND,
+            "mean": self.mean.tolist(),
+            "std": self.std.tolist(),
+            "feature_names": PHYSICS_FEATURE_NAMES,
+        }
+
+    @classmethod
+    def from_dict(cls, state):
+
+        kind = state.get("kind")
+
+        if kind != cls.KIND:
+            raise ValueError(
+                f"Unknown physics normalization "
+                f"kind {kind!r}."
+            )
+
+        return cls(
+            state["mean"],
+            state["std"],
+        )
+
+    def __repr__(self):
+
+        return (
+            f"PhysicsNormalizer("
+            f"kind='{self.KIND}', "
             f"mean={np.array2string(self.mean, precision=4)}, "
             f"std={np.array2string(self.std, precision=4)})"
         )

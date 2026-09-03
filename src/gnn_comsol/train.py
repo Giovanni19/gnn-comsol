@@ -155,46 +155,6 @@ def train_network(
 
     return best_model_state, train_loss_history, val_loss_history
 
-def weighted_mse_loss(
-    preds,
-    target,
-    delta_t,
-    dt_reference=0.1,
-    max_weight=5.0,
-):
-    """
-    MSE weighted according to the physical timestep.
-
-    w(dt) = min(dt_reference / dt, max_weight)
-
-    Smaller timesteps receive larger weights.
-    """
-
-    # Squared error for every node
-    element_loss = (
-        preds - target
-    ) ** 2
-
-    # One weight per timestep
-    weights = (
-        dt_reference / delta_t
-    )
-
-    # Limit the maximum importance of very small timesteps
-    weights = torch.clamp(
-        weights,
-        min=1.0,
-        max=max_weight,
-    )
-
-    # [B] -> [B, 1, 1]
-    while weights.ndim < element_loss.ndim:
-        weights = weights.unsqueeze(-1)
-
-    return (
-        weights * element_loss
-    ).mean()
-
 def train_bsms_multi_simulation(
     net,
     train_loaders,
@@ -293,11 +253,11 @@ def train_bsms_multi_simulation(
 
             pos = hierarchy["pos"].to(device)
 
-            for X, Y, delta_t in loader:
+            for X, Y in loader:
 
                 X = X.to(device)
                 Y = Y.to(device)
-                delta_t = delta_t.to(device)
+
                 optimizer.zero_grad()
 
                 preds = net(
@@ -312,12 +272,9 @@ def train_bsms_multi_simulation(
                     target_columns
                 ]
 
-                loss = weighted_mse_loss(
+                loss = criterion(
                     preds,
                     target,
-                    delta_t,
-                    dt_reference=0.1,
-                    max_weight=100.0,
                 )
 
                 loss.backward()
@@ -374,7 +331,7 @@ def train_bsms_multi_simulation(
                     device
                 )
 
-                for X, Y, _ in loader:
+                for X, Y in loader:
 
                     X = X.to(device)
                     Y = Y.to(device)

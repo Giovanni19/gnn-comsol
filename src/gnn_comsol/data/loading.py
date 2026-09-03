@@ -61,7 +61,7 @@ class RawDataset:
     delta_t: np.ndarray
     h: np.ndarray
     pos: np.ndarray
-
+    physics_features: np.ndarray | None = None
     simulation_id: int | None = None
     file_path: str | None = None
 
@@ -124,9 +124,27 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
         h = np.array(f["h"])
         P = np.array(f["P"])
 
+        if "physics_features" in f:
+            physics_features = np.array(
+                f["physics_features"]
+            )
+        else:
+            physics_features = None
+
     # MATLAB stores arrays in Fortran order: (3, N, T) -> (T, N, 3)
     X = np.transpose(X, (2, 1, 0))
+    if physics_features is not None:
 
+        # MATLAB/HDF5:
+        #     (5, N, T)
+        #
+        # Python:
+        #     (T, N, 5)
+
+        physics_features = np.transpose(
+            physics_features,
+            (2, 1, 0)
+        )
     edge_index = edge_index.astype(np.int64)
     edge_weight = edge_weight.squeeze()
     t = t.squeeze()
@@ -151,10 +169,45 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
     X_input = X[skip_initial:-1]
     Y_target = X[skip_initial + 1:]
     delta_t = step[skip_initial:]
+    if physics_features is not None:
+
+        physics_input = physics_features[
+            skip_initial:-1
+        ]
+
+    else:
+
+        physics_input = None
     # ------------------------------------------------------------
     # Consistency checks
     # ------------------------------------------------------------
+    if physics_input is not None:
 
+        if physics_input.shape[0] != X_input.shape[0]:
+            raise ValueError(
+                f"{file_path}: physics features have "
+                f"{physics_input.shape[0]} samples, "
+                f"but X_input has {X_input.shape[0]}."
+            )
+
+        if physics_input.shape[1] != X_input.shape[1]:
+            raise ValueError(
+                f"{file_path}: physics features have "
+                f"{physics_input.shape[1]} nodes, "
+                f"but X_input has {X_input.shape[1]}."
+            )
+
+        if physics_input.shape[2] != 5:
+            raise ValueError(
+                f"{file_path}: expected 5 physics features, "
+                f"got {physics_input.shape[2]}."
+            )
+
+        if not np.all(np.isfinite(physics_input)):
+            raise ValueError(
+                f"{file_path}: physics features contain "
+                f"NaN or Inf values."
+            )
     num_nodes = X_input.shape[1]
 
     # P may be stored as (N, 2) or (2, N)
@@ -187,6 +240,7 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
         delta_t=delta_t,
         h=h,
         pos=pos,
+        physics_features=physics_input,
         simulation_id=simulation_id,
         file_path=str(file_path)
     )

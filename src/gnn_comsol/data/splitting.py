@@ -23,6 +23,7 @@ class Split:
     Y: np.ndarray
     dt: np.ndarray
     indices: np.ndarray
+    physics_features: np.ndarray | None = None
 
     def __len__(self):
         return len(self.X)
@@ -205,6 +206,22 @@ def split_dataset(
     n_samples = raw.num_samples
 
     delta_t = raw.delta_t
+    if raw.physics_features is not None:
+
+        if len(raw.physics_features) != n_samples:
+            raise ValueError(
+                f"physics_features has "
+                f"{len(raw.physics_features)} samples "
+                f"but there are {n_samples} X samples: "
+                "they must line up index by index."
+            )
+
+        if raw.physics_features.shape[1] != raw.num_nodes:
+            raise ValueError(
+                f"physics_features has "
+                f"{raw.physics_features.shape[1]} nodes "
+                f"but X has {raw.num_nodes} nodes."
+            )
 
     # load_data lines delta_t up with X_input index by index. A mismatch
     # here would silently shift the time step of every sample, so fail
@@ -226,11 +243,18 @@ def split_dataset(
     )
 
     def block(indices):
+
+        physics_features = None
+
+        if raw.physics_features is not None:
+            physics_features = raw.physics_features[indices]
+
         return Split(
             X=raw.X_input[indices],
             Y=raw.Y_target[indices],
             dt=delta_t[indices],
-            indices=indices
+            indices=indices,
+            physics_features=physics_features,
         )
 
     return SplitDataset(
@@ -428,11 +452,17 @@ def subset_simulation(simulation, indices):
 
     indices = np.asarray(indices, dtype=np.int64)
 
+    physics_features = None
+
+    if simulation.physics_features is not None:
+        physics_features = simulation.physics_features[indices]
+
     return replace(
         simulation,
         X_input=simulation.X_input[indices],
         Y_target=simulation.Y_target[indices],
         delta_t=simulation.delta_t[indices],
+        physics_features=physics_features,
     )
 
 
@@ -544,3 +574,5 @@ def split_simulations_by_group(
         val=block(val_indices),
         test=block(test_indices),
     )
+
+

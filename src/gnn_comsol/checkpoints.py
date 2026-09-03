@@ -15,16 +15,24 @@ an error, which is the worst way to fail.
 """
 
 import torch
+from .data.normalization import (
+    PhysicsNormalizer,
+    StateNormalizer,
+)
 
-from .data.normalization import StateNormalizer
-
-
-def save_checkpoint(path, model, normalizer, metadata=None):
+def save_checkpoint(
+    path,
+    model,
+    normalizer,
+    metadata=None,
+    physics_normalizer=None,
+):
     """
-    Save weights, normalizer and run description.
+    Save weights, state normalizer, optional physics normalizer
+    and run description.
 
-    metadata must contain only primitive types, so the checkpoint stays
-    loadable in weights-only mode.
+    The physics normalizer is required by models that use
+    physics-derived input features.
     """
 
     if normalizer is None:
@@ -34,13 +42,20 @@ def save_checkpoint(path, model, normalizer, metadata=None):
             "back to physical units."
         )
 
+    checkpoint = {
+        "state_dict": model.state_dict(),
+        "normalizer": normalizer.to_dict(),
+        "metadata": metadata or {},
+    }
+
+    if physics_normalizer is not None:
+        checkpoint["physics_normalizer"] = (
+            physics_normalizer.to_dict()
+        )
+
     torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "normalizer": normalizer.to_dict(),
-            "metadata": metadata or {}
-        },
-        path
+        checkpoint,
+        path,
     )
 
 
@@ -70,3 +85,46 @@ def load_checkpoint(path, model=None, device=None):
         model.load_state_dict(checkpoint["state_dict"])
 
     return model, normalizer, checkpoint.get("metadata", {})
+
+def load_physics_normalizer(
+    path,
+    device=None,
+    required=False,
+):
+    """
+    Load the PhysicsNormalizer stored in a checkpoint.
+
+    Parameters
+    ----------
+    required : bool
+        If True, raise an error when the checkpoint does not
+        contain a physics normalizer.
+
+        If False, return None for checkpoints/models that do
+        not use physics-derived features.
+    """
+
+    checkpoint = torch.load(
+        path,
+        map_location=device,
+        weights_only=True,
+    )
+
+    state = checkpoint.get(
+        "physics_normalizer"
+    )
+
+    if state is None:
+
+        if required:
+            raise ValueError(
+                f"{path} has no physics normalizer stored "
+                "in it, but this model requires "
+                "physics-derived input features."
+            )
+
+        return None
+
+    return PhysicsNormalizer.from_dict(
+        state
+    )

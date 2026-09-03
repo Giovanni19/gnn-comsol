@@ -252,8 +252,11 @@ def split_and_report(simulations, config):
 # =====================================================================
 # Scaling, computed on the training block only
 # =====================================================================
-
 def build_normalizer(train_simulations):
+
+    # =========================================================
+    # State normalization
+    # =========================================================
 
     x_mean, x_std, dt_mean, dt_std = (
         gdata.compute_multi_simulation_normalization_parameters(
@@ -261,7 +264,10 @@ def build_normalizer(train_simulations):
         )
     )
 
-    normalizer = gdata.StateNormalizer(x_mean, x_std)
+    normalizer = gdata.StateNormalizer(
+        x_mean,
+        x_std,
+    )
 
     print(f"\n{normalizer}")
 
@@ -270,11 +276,76 @@ def build_normalizer(train_simulations):
         f"mean={dt_mean:.6e}, std={dt_std:.6e}"
     )
 
-    return normalizer, dt_mean, dt_std
+    # =========================================================
+    # Physics-feature normalization
+    # =========================================================
+
+    physics_arrays = []
+
+    for simulation in train_simulations:
+
+        if simulation.physics_features is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                "does not contain physics_features."
+            )
+
+        physics_arrays.append(
+            simulation.physics_features
+        )
+
+    # This works because all training simulations currently
+    # have the same number of physics features.
+    #
+    # Different numbers of nodes are also supported because
+    # we flatten samples and nodes together.
+    physics_flat = np.concatenate(
+        [
+            physics.reshape(
+                -1,
+                physics.shape[-1],
+            )
+            for physics in physics_arrays
+        ],
+        axis=0,
+    )
+
+    physics_mean = physics_flat.mean(
+        axis=0
+    )
+
+    physics_std = physics_flat.std(
+        axis=0
+    ) + 1e-8
+
+    physics_normalizer = gdata.PhysicsNormalizer(
+        physics_mean,
+        physics_std,
+    )
+
+    print(f"\n{physics_normalizer}")
+
+    return (
+        normalizer,
+        physics_normalizer,
+        dt_mean,
+        dt_std,
+    )
 
 
-def normalize_all_splits(splits, normalizer, dt_mean, dt_std):
-    """split name -> list of normalized simulations, mesh preserved."""
+def normalize_all_splits(
+    splits,
+    normalizer,
+    physics_normalizer,
+    dt_mean,
+    dt_std,
+):
+    """
+    Split name -> list of normalized simulations.
+
+    State and physics-derived features use separate normalizers.
+    Both normalizers were fitted using TRAINING DATA ONLY.
+    """
 
     blocks = {
         "train": splits.train,
@@ -282,18 +353,61 @@ def normalize_all_splits(splits, normalizer, dt_mean, dt_std):
         "test": splits.test,
     }
 
-    return {
-        split_name: [
-            gdata.normalize_simulation(
-                simulation,
-                normalizer,
-                dt_mean,
-                dt_std,
+    normalized = {}
+
+    for split_name, split_simulations in blocks.items():
+
+        normalized[split_name] = []
+
+        for simulation in split_simulations:
+
+            normalized_simulation = (
+                gdata.normalize_simulation(
+                    simulation,
+                    normalizer,
+                    dt_mean,
+                    dt_std,
+                )
             )
-            for simulation in split_simulations
-        ]
-        for split_name, split_simulations in blocks.items()
-    }
+
+            if simulation.physics_features is None:
+                raise ValueError(
+                    f"Simulation {simulation.simulation_id} "
+                    "does not contain physics_features."
+                )
+
+            normalized_simulation["physics_features"] = (
+                physics_normalizer.transform(
+                    simulation.physics_features
+                )
+            )
+            if split_name == "train":
+
+                pf = normalized_simulation[
+                    "physics_features"
+                ]
+
+                print(
+                    f"Physics normalized | "
+                    f"simulation {simulation.simulation_id} | "
+                    f"shape={pf.shape}"
+                )
+
+                print(
+                    "  mean:",
+                    pf.mean(axis=(0, 1))
+                )
+
+                print(
+                    "  std :",
+                    pf.std(axis=(0, 1))
+                )
+
+            normalized[split_name].append(
+                normalized_simulation
+            )
+
+    return normalized
 
 
 # =====================================================================
@@ -416,7 +530,7 @@ def predict_velocity_for_simulation(
         simulation["X"],
         simulation["dt"],
     )
-
+ 
     edge_index = torch.as_tensor(
         simulation["edge_index"],
         dtype=torch.long,
@@ -573,7 +687,31 @@ def build_pressure_loaders(
                 simulation["X"],
                 simulation["dt"],
             )
+            # -----------------------------------------------
+            # Add normalized physics-derived features
+            # -----------------------------------------------
 
+            physics_features = simulation[
+                "physics_features"
+            ]
+
+            if (
+                physics_features.shape[:2]
+                != features.shape[:2]
+            ):
+                raise ValueError(
+                    f"Simulation {simulation_id}: "
+                    "physics features and pressure "
+                    "features have incompatible shapes."
+                )
+
+            features = np.concatenate(
+                [
+                    features,
+                    physics_features,
+                ],
+                axis=-1,
+            )
             # -----------------------------------------------
             # Add predicted u(t+1), v(t+1)
             # -----------------------------------------------
@@ -610,7 +748,6 @@ def build_pressure_loaders(
             pressure_dataset = gdata.create_bsms_dataset(
                 features,
                 simulation["Y"],
-                delta_t=simulation["dt_physical"],
             )
 
             sample = pressure_dataset[0]
@@ -678,6 +815,10 @@ def train_one_network(
     num_in = gdata.FEATURE_SIZES[
         network["features"]
     ]
+
+    # Physics-derived features are used only by pressure.
+    if network_name == "pressure":
+        num_in += gdata.NUM_PHYSICS_FEATURES
 
     if network.get(
         "use_predicted_velocity",
@@ -814,6 +955,7 @@ def train_all_networks(
     velocity_loaders,
     bsms_hierarchies,
     normalizer,
+    physics_normalizer,
     run_dir,
     criterion,
     device,
@@ -891,14 +1033,34 @@ def train_all_networks(
             checkpoint_path,
             best["model"],
             normalizer,
+
+            physics_normalizer=(
+                physics_normalizer
+                if network_name == "pressure"
+                else None
+            ),
+
             metadata={
                 "experiment": config["name"],
                 "network": network_name,
                 "predicts": network["predicts"],
                 "features": network["features"],
+
+                "use_physics_features": (
+                    network_name == "pressure"
+                ),
+
+                "physics_feature_names": (
+                    gdata.PHYSICS_FEATURE_NAMES
+                    if network_name == "pressure"
+                    else []
+                ),
+
                 "use_predicted_velocity": network.get(
                     "use_predicted_velocity",
-                    False),
+                    False
+                ),
+
                 "num_in": best["num_in"],
                 "num_out": best["num_out"],
                 "split_mode": config["split"]["mode"],
@@ -910,10 +1072,13 @@ def train_all_networks(
                     for key in SWEEP_KEYS
                 },
 
-                # BSMS-specific parameters.
-                # None for architectures that do not use BSMS.
-                "unet_depth": best["config"].get("unet_depth"),
-                "hidden_layers": best["config"].get("hidden_layers"),
+                "unet_depth": best["config"].get(
+                    "unet_depth"
+                ),
+
+                "hidden_layers": best["config"].get(
+                    "hidden_layers"
+                ),
             }
         )
 
@@ -1050,10 +1215,21 @@ def main():
 
     splits = split_and_report(simulations, config)
 
-    normalizer, dt_mean, dt_std = build_normalizer(splits.train)
+    (
+        normalizer,
+        physics_normalizer,
+        dt_mean,
+        dt_std,
+    ) = build_normalizer(
+        splits.train
+    )
 
     normalized = normalize_all_splits(
-        splits, normalizer, dt_mean, dt_std
+        splits,
+        normalizer,
+        physics_normalizer,
+        dt_mean,
+        dt_std,
     )
 
     bsms_hierarchies = build_bsms_hierarchies(simulations, config)
@@ -1062,15 +1238,16 @@ def main():
     
 
     trained, sweep_rows = train_all_networks(
-    config,
-    normalized,
-    velocity_loaders,
-    bsms_hierarchies,
-    normalizer,
-    run_dir,
-    nn.MSELoss(),
-    device,
-    verbose=not args.quiet,
+        config,
+        normalized,
+        velocity_loaders,
+        bsms_hierarchies,
+        normalizer,
+        physics_normalizer,
+        run_dir,
+        nn.MSELoss(),
+        device,
+        verbose=not args.quiet,
     )
 
     # NOTE: one-step inference in physical units used to run here, and

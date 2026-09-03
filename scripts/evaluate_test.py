@@ -37,12 +37,12 @@ from matplotlib.animation import (
 # ===============================================================
 
 RUN_DIR = Path(
-    "outputs/multi_geometry_bsms_predicted_velocity_test_20260902_120159"
+    "outputs/multi_geometry_bsms_predicted_velocity_smoother_20260902_170733"
 )
 
 TEST_DATASET = (
     "C:/Users/giovanni/.comsol/v64/llmatlab/"
-    "channel2d_gnn_dataset.mat"
+    "channel2d_circular_cavity_gnn_dataset.mat"
 )
 
 
@@ -166,6 +166,28 @@ test_simulation = gdata.load_data(
     skip_initial=skip_initial,
     simulation_id=3,
 )
+
+print("\n=== TEST GEOMETRY ===")
+print("Dataset:", TEST_DATASET)
+print("pos shape:", test_simulation.pos.shape)
+
+print("x min/max:",
+      test_simulation.pos[:, 0].min(),
+      test_simulation.pos[:, 0].max())
+
+print("y min/max:",
+      test_simulation.pos[:, 1].min(),
+      test_simulation.pos[:, 1].max())
+
+plt.figure()
+plt.scatter(
+    test_simulation.pos[:, 0],
+    test_simulation.pos[:, 1],
+    s=2
+)
+plt.axis("equal")
+plt.title("Geometry loaded from TEST_DATASET")
+plt.show()
 
 print(
     f"\nTest simulation: "
@@ -736,9 +758,8 @@ print("\nCreating pressure error animation...")
 x = test_simulation.pos[:, 0]
 y = test_simulation.pos[:, 1]
 
-
 # ---------------------------------------------------------------
-# Build a triangulation for visualization
+# Build Delaunay triangulation
 # ---------------------------------------------------------------
 
 triangulation = mtri.Triangulation(
@@ -746,6 +767,60 @@ triangulation = mtri.Triangulation(
     y,
 )
 
+# ---------------------------------------------------------------
+# Remove triangles that do not exist in the original graph
+#
+# A valid triangle must have all three edges present in edge_index.
+# This prevents matplotlib from creating triangles across cavities.
+# ---------------------------------------------------------------
+
+edge_index_np = np.asarray(test_simulation.edge_index)
+
+# Make sure shape is [2, num_edges]
+if edge_index_np.shape[0] != 2:
+    edge_index_np = edge_index_np.T
+
+# Build an undirected edge set
+edge_set = set()
+
+for i, j in edge_index_np.T:
+    i = int(i)
+    j = int(j)
+
+    edge_set.add((min(i, j), max(i, j)))
+
+
+def edge_exists(i, j):
+    return (min(i, j), max(i, j)) in edge_set
+
+
+triangles = triangulation.triangles
+
+mask = np.zeros(
+    len(triangles),
+    dtype=bool,
+)
+
+for k, (i, j, l) in enumerate(triangles):
+
+    valid_triangle = (
+        edge_exists(i, j)
+        and edge_exists(j, l)
+        and edge_exists(l, i)
+    )
+
+    if not valid_triangle:
+        mask[k] = True
+
+
+triangulation.set_mask(mask)
+
+print(
+    f"Visualization triangulation: "
+    f"{len(triangles)} total triangles | "
+    f"{np.sum(mask)} removed | "
+    f"{len(triangles) - np.sum(mask)} retained"
+)
 
 # ---------------------------------------------------------------
 # Fixed color scale for the whole animation
@@ -780,7 +855,7 @@ fig, ax = plt.subplots(
 initial_plot = ax.tripcolor(
     triangulation,
     pressure_absolute_error[0],
-    shading="gouraud",
+    shading="flat",
     vmin=vmin,
     vmax=vmax,
     cmap="viridis",
@@ -860,7 +935,7 @@ animation_path = (
 animation.save(
     animation_path,
     writer=PillowWriter(
-        fps=1
+        fps=15
     ),
 )
 
