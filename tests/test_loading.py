@@ -140,3 +140,36 @@ def test_load_simulations_numbers_them_in_order(make_dataset):
 
     for simulation, info in zip(simulations, infos):
         assert simulation.file_path == str(info["path"])
+
+
+@pytest.mark.parametrize("skip", [0, 1, 3])
+def test_physics_features_come_back_aligned_with_the_input(
+    make_dataset, skip
+):
+    """
+    Same axis order and same alignment as X: physics feature i must
+    describe the state the network is given, not the one it predicts.
+    """
+
+    info = make_dataset(num_snapshots=12)
+
+    raw = load_data(info["path"], skip_initial=skip)
+
+    assert raw.physics_features.shape == (
+        raw.num_samples, raw.num_nodes, 5
+    )
+
+    expected = info["physics_features"][skip:-1]
+
+    assert np.allclose(raw.physics_features, expected)
+
+
+def test_a_dataset_without_physics_features_loads_fine(make_dataset):
+    """The six multi-geometry .mat files are still in this layout."""
+
+    info = make_dataset(with_physics=False)
+
+    raw = load_data(info["path"])
+
+    assert raw.physics_features is None
+    assert raw.num_samples == info["num_snapshots"] - 1

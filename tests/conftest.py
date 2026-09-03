@@ -15,6 +15,8 @@ import h5py
 import numpy as np
 import pytest
 
+from gnn_comsol.data.normalization import NUM_PHYSICS_FEATURES
+
 
 def grid_mesh(rows, cols, spacing=1.0):
     """
@@ -57,7 +59,8 @@ def write_dataset(
     cols=4,
     seed=0,
     marker_snapshots=False,
-    transpose_positions=False
+    transpose_positions=False,
+    with_physics=True
 ):
     """
     Write one synthetic simulation in the layout load_data expects.
@@ -74,6 +77,14 @@ def write_dataset(
     transpose_positions : bool
         Store P as (2, N) instead of (N, 2), to exercise the orientation
         handling in load_data.
+
+    with_physics : bool
+        Include the physics_features array. True by default, because
+        that is what a freshly generated .mat now looks like. Pass False
+        to write a file in the older layout: the six multi-geometry
+        datasets predate the feature and the MATLAB generator in this
+        repository still does not produce it, so a run must work without
+        it and must fail clearly when a config asks for it anyway.
 
     Returns
     -------
@@ -109,6 +120,24 @@ def write_dataset(
 
     stored_pos = pos.T if transpose_positions else pos
 
+    # The five physics-derived features COMSOL now exports:
+    # du/dx, du/dy, dv/dx, dv/dy and div[(u . grad)u]. They are given
+    # deliberately different scales, because the physics normalizer has
+    # to bring them onto a common one and a test on identically scaled
+    # columns would not notice if it did nothing.
+    physics_features = None
+
+    if with_physics:
+
+        scales = np.array([1.0, 2.0, 0.5, 4.0, 100.0])
+
+        physics_features = (
+            rng.normal(
+                size=(num_snapshots, num_nodes, NUM_PHYSICS_FEATURES)
+            )
+            * scales
+        )
+
     with h5py.File(path, "w") as f:
         # MATLAB axis order: load_data transposes (3, N, T) -> (T, N, 3)
         f["X"] = np.transpose(X, (2, 1, 0))
@@ -118,12 +147,19 @@ def write_dataset(
         f["h"] = np.array([[0.1]])
         f["P"] = stored_pos
 
+        if physics_features is not None:
+            # Same axis order as X: (T, N, F) -> (F, N, T)
+            f["physics_features"] = np.transpose(
+                physics_features, (2, 1, 0)
+            )
+
     return {
         "path": path,
         "X": X,
         "t": t,
         "edge_index": edge_index,
         "pos": pos,
+        "physics_features": physics_features,
         "num_nodes": num_nodes,
         "num_edges": edge_index.shape[1],
         "num_snapshots": num_snapshots

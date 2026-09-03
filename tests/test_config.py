@@ -269,6 +269,100 @@ def test_allow_partial_state_permits_a_velocity_only_experiment(tmp_path):
         load_config(write(tmp_path, velocity_only, name="no_flag.yaml"))
 
 
+# ---------------------------------------------------------------------
+# Extra input features
+# ---------------------------------------------------------------------
+
+BSMS_PRESSURE = {
+    "predicts": "pressure",
+    "features": "time",
+    "architecture": "bsms",
+    "unet_depth": 2,
+    "hidden_layers": 1
+}
+
+
+def test_extra_feature_flags_default_to_off(tmp_path):
+    """
+    The width of a model must follow the configuration, so both flags
+    have to exist with a known value rather than being read with .get()
+    in whichever module happens to need them.
+    """
+
+    config = load_config(write(tmp_path, BASE))
+
+    for network in config["networks"].values():
+        assert network["use_physics_features"] is False
+        assert network["use_predicted_velocity"] is False
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["use_physics_features", "use_predicted_velocity"]
+)
+def test_extra_features_are_rejected_outside_bsms(tmp_path, flag):
+    """
+    Only the BSMS loader assembles them. On any other architecture the
+    model would be built wider than the loader that feeds it, and the
+    mismatch would only surface inside the first forward pass.
+    """
+
+    broken = {
+        **BASE,
+        "networks": {
+            "velocity": {"predicts": "velocity"},
+            "pressure": {
+                "predicts": "pressure",
+                "architecture": "gcn_virtual_node",
+                flag: True
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="only wired into"):
+        load_config(write(tmp_path, broken))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["use_physics_features", "use_predicted_velocity"]
+)
+def test_extra_feature_flags_must_be_boolean(tmp_path, flag):
+
+    broken = {
+        **BASE,
+        "networks": {
+            "velocity": {"predicts": "velocity"},
+            "pressure": {**BSMS_PRESSURE, flag: "yes"}
+        }
+    }
+
+    with pytest.raises(ValueError, match="true or false"):
+        load_config(write(tmp_path, broken))
+
+
+def test_extra_features_are_accepted_on_bsms(tmp_path):
+
+    accepted = {
+        **BASE,
+        "networks": {
+            "velocity": {"predicts": "velocity"},
+            "pressure": {
+                **BSMS_PRESSURE,
+                "use_physics_features": True,
+                "use_predicted_velocity": True
+            }
+        }
+    }
+
+    config = load_config(write(tmp_path, accepted))
+
+    pressure = config["networks"]["pressure"]
+
+    assert pressure["use_physics_features"] is True
+    assert pressure["use_predicted_velocity"] is True
+
+
 @pytest.mark.parametrize("skip", [-1, 1.5, "two"])
 def test_invalid_skip_initial_is_rejected(tmp_path, skip):
 

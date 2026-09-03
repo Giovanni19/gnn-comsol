@@ -5,7 +5,9 @@ from .features import (
     add_time_derivative_features,
     add_time_feature,
     add_time_fourier_features,
-    build_features
+    build_features,
+    build_pressure_features,
+    pressure_features_size
 )
 
 from .graphs import (
@@ -34,7 +36,8 @@ from .normalization import (
     PHYSICS_FEATURE_NAMES,
     NUM_PHYSICS_FEATURES,
     PhysicsNormalizer,
-    compute_physics_normalization_parameters
+    compute_physics_normalization_parameters,
+    compute_multi_simulation_physics_normalization_parameters
 )
 
 from .splitting import (
@@ -67,6 +70,8 @@ __all__ = [
     "add_time_feature",
     "add_time_fourier_features",
     "build_features",
+    "build_pressure_features",
+    "pressure_features_size",
     "compute_normalization_parameters",
     "compute_multi_simulation_normalization_parameters",
     "compute_split_indices",
@@ -87,4 +92,5 @@ __all__ = [
     "PHYSICS_FEATURE_NAMES",
     "PhysicsNormalizer",
     "compute_physics_normalization_parameters",
+    "compute_multi_simulation_physics_normalization_parameters",
 ]

@@ -35,6 +35,8 @@ networks:
     weight_decay: float or [float, ...]
     unet_depth: int          # BSMS only
     hidden_layers: int       # BSMS only
+    use_physics_features: bool      # BSMS only, default False
+    use_predicted_velocity: bool    # BSMS only, default False
 
 Any of the last five may be a list, in which case every combination is
 trained and the one with the lowest validation loss is kept.
@@ -86,7 +88,16 @@ NETWORK_DEFAULTS = {
     "num_layers": 3,
     "dropout": 0.0,
     "learning_rate": 1.0e-3,
-    "weight_decay": 1.0e-5
+    "weight_decay": 1.0e-5,
+
+    # Extra input features, off unless a config asks for them. They must
+    # be declared here and nowhere else: the number of input channels of
+    # the model is derived from these flags, and so is the feature vector
+    # the loaders build. Deriving either of them from the NAME of the
+    # network instead would make renaming a network in the YAML silently
+    # change the architecture.
+    "use_physics_features": False,
+    "use_predicted_velocity": False
 }
 
 BSMS_DEFAULTS = {
@@ -263,6 +274,27 @@ def _validate(config, path):
                     f"{path}: BSMS network {name!r} requires "
                     "hidden_layers >= 1."
                 )
+
+        # Extra input features. Both are wired into the loader that
+        # feeds the BSMS network only, so allowing them elsewhere would
+        # build a model with more input channels than the loader
+        # supplies and fail at the first forward pass.
+        for flag in ("use_physics_features", "use_predicted_velocity"):
+
+            if not isinstance(merged[flag], bool):
+                raise ValueError(
+                    f"{path}: network {name!r} has "
+                    f"{flag}={merged[flag]!r}; it must be true or false."
+                )
+
+            if merged[flag] and merged["architecture"] != "bsms":
+                raise ValueError(
+                    f"{path}: network {name!r} sets {flag}=true, but "
+                    f"has architecture={merged['architecture']!r}. "
+                    "Extra input features are currently only wired into "
+                    "the BSMS pressure path."
+                )
+
         coverage[TARGET_COLUMNS[predicts]] += 1
 
     allow_partial_state = config.get(

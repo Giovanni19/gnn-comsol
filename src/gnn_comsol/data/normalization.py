@@ -132,6 +132,61 @@ def compute_physics_normalization_parameters(
 
     return mean, std
 
+
+def compute_multi_simulation_physics_normalization_parameters(
+    train_simulations,
+):
+    """
+    Physics-feature mean and std over all TRAINING simulations.
+
+    The counterpart of compute_multi_simulation_normalization_parameters
+    for the physics-derived node features. Simulations may have
+    different meshes: samples and nodes are flattened together, so every
+    node at every timestep contributes equally regardless of how fine
+    its mesh is.
+
+    Validation and test simulations must NOT be passed to this function.
+
+    Returns
+    -------
+    mean : ndarray, shape (NUM_PHYSICS_FEATURES,)
+    std : ndarray, shape (NUM_PHYSICS_FEATURES,)
+    """
+
+    if len(train_simulations) == 0:
+        raise ValueError(
+            "At least one training simulation is required."
+        )
+
+    flattened = []
+
+    for simulation in train_simulations:
+
+        features = simulation.physics_features
+
+        if features is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                f"({simulation.file_path}) has no physics_features, "
+                "but the experiment asked for them. Either regenerate "
+                "the .mat with physics features, or drop "
+                "use_physics_features from the configuration."
+            )
+
+        flattened.append(
+            np.asarray(features, dtype=np.float64).reshape(
+                -1,
+                features.shape[-1]
+            )
+        )
+
+    flat = np.concatenate(flattened, axis=0)
+
+    # A leading axis of 1 reuses the validation and the statistics of the
+    # single-simulation version: mean and std are taken over axes (0, 1),
+    # which is exactly the flattened sample-node axis.
+    return compute_physics_normalization_parameters(flat[None, ...])
+
 def compute_multi_simulation_normalization_parameters(train_simulations):
     """
     Compute normalization parameters using all TRAINING simulations.
@@ -565,6 +620,7 @@ def normalize_simulation(
     normalizer,
     dt_mean,
     dt_std,
+    physics_normalizer=None,
 ):
     """
     Normalize one complete simulation while preserving its mesh.
@@ -576,9 +632,16 @@ def normalize_simulation(
         Original physical timestep. It is kept separately so that
         timestep-dependent training losses can use the real delta_t
         without reconstructing it from the normalized value.
+
+    physics_features:
+        Present only when a physics_normalizer is given, that is when
+        some network in the experiment asked for physics-derived
+        features. State and physics features have their own normalizers
+        because they live in different units and have wildly different
+        scales; both must be fitted on training data only.
     """
 
-    return {
+    normalized = {
         "X": normalizer.transform(
             simulation.X_input
         ),
@@ -602,3 +665,22 @@ def normalize_simulation(
         "simulation_id": simulation.simulation_id,
         "file_path": simulation.file_path,
     }
+
+    if physics_normalizer is not None:
+
+        if simulation.physics_features is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                f"({simulation.file_path}) has no physics_features, "
+                "but the experiment asked for them. Either regenerate "
+                "the .mat with physics features, or drop "
+                "use_physics_features from the configuration."
+            )
+
+        normalized["physics_features"] = (
+            physics_normalizer.transform(
+                simulation.physics_features
+            )
+        )
+
+    return normalized

@@ -23,6 +23,11 @@ import numpy as np
 import pytest
 import yaml
 
+from gnn_comsol.data.normalization import (
+    NUM_PHYSICS_FEATURES,
+    PHYSICS_FEATURE_NAMES
+)
+
 REPO = Path(__file__).resolve().parents[1]
 
 # Meshes of four different sizes, all big enough to survive the BSMS
@@ -36,6 +41,27 @@ def simulations(make_dataset):
 
     return [
         make_dataset(rows=rows, cols=cols, seed=index, num_snapshots=14)
+        for index, (rows, cols) in enumerate(MESHES)
+    ]
+
+
+@pytest.fixture
+def simulations_without_physics(make_dataset):
+    """
+    The same four, in the layout that predates physics features.
+
+    This is what the six multi-geometry .mat files look like, and what
+    the MATLAB generator in this repository still produces.
+    """
+
+    return [
+        make_dataset(
+            rows=rows,
+            cols=cols,
+            seed=index,
+            num_snapshots=14,
+            with_physics=False
+        )
         for index, (rows, cols) in enumerate(MESHES)
     ]
 
@@ -63,6 +89,14 @@ PRESSURE_BSMS_NET = {
     "num_layers": 1,
     "dropout": 0.0
 }
+
+PRESSURE_BSMS_PHYSICS_NET = {
+    **PRESSURE_BSMS_NET,
+    "use_physics_features": True
+}
+
+# "time" is 4 features: u, v, p, dt
+BASE_FEATURES = 4
 
 
 def write_config(
@@ -330,6 +364,169 @@ def test_velocity_and_bsms_pressure_run(simulations, tmp_path):
     for name in ("velocity", "pressure"):
         loss = metrics["test_loss_normalized"][name]
         assert np.isfinite(loss), f"{name} test loss is {loss}"
+
+
+# ---------------------------------------------------------------------
+# Physics-derived input features
+#
+# These were briefly mandatory: every run rebuilt their normalizer and
+# refused any dataset without them, which broke the six multi-geometry
+# .mat files and every test in this file. They are opt-in now, and the
+# three cases below are with, without, and asked-for-but-missing.
+# ---------------------------------------------------------------------
+
+def test_pressure_uses_physics_features_when_asked(
+    simulations, tmp_path
+):
+    """The flag widens the model and the checkpoint records it."""
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_PHYSICS_NET
+        },
+        name="smoke_physics"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    from gnn_comsol.checkpoints import (
+        load_physics_normalizer,
+        read_checkpoint
+    )
+
+    bundle = read_checkpoint(run_dir / "pressure.pth")
+
+    metadata = bundle.metadata
+
+    assert metadata["use_physics_features"] is True
+    assert metadata["physics_feature_names"] == PHYSICS_FEATURE_NAMES
+    assert metadata["num_in"] == BASE_FEATURES + NUM_PHYSICS_FEATURES
+
+    # The scaling of the physics features must travel with the weights
+    # for the same reason the state scaling does: whoever rebuilds these
+    # features at inference cannot be left to guess it.
+    physics_normalizer = load_physics_normalizer(
+        run_dir / "pressure.pth",
+        required=True
+    )
+
+    assert physics_normalizer.mean.shape == (NUM_PHYSICS_FEATURES,)
+    assert np.all(physics_normalizer.std > 0)
+
+    assert np.allclose(
+        bundle.physics_normalizer.mean, physics_normalizer.mean
+    )
+
+    # The velocity network was not fed them, so it must not claim to
+    # carry their scaling.
+    velocity_bundle = read_checkpoint(run_dir / "velocity.pth")
+
+    assert velocity_bundle.metadata["use_physics_features"] is False
+    assert velocity_bundle.physics_normalizer is None
+    assert load_physics_normalizer(run_dir / "velocity.pth") is None
+
+    # The time-step scaling is part of how EVERY network was fed, so it
+    # has to travel with the weights. It used to live only in the stdout
+    # of a run, and the evaluation script carried a stale copy of it.
+    for spec in (bundle, velocity_bundle):
+        assert spec.dt_mean is not None
+        assert spec.dt_std is not None and spec.dt_std > 0
+
+    assert bundle.dt_mean == velocity_bundle.dt_mean
+    assert bundle.dt_std == velocity_bundle.dt_std
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    for name in ("velocity", "pressure"):
+        assert np.isfinite(metrics["test_loss_normalized"][name])
+
+
+def test_physics_features_are_off_unless_requested(
+    simulations, tmp_path
+):
+    """
+    A dataset that HAS physics features must not get them silently.
+
+    The width of the model is part of the experiment, so it has to
+    follow the configuration and not what happens to be in the .mat.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_NET
+        },
+        name="smoke_no_physics_flag"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    from gnn_comsol.checkpoints import (
+        load_checkpoint,
+        load_physics_normalizer
+    )
+
+    _, _, metadata = load_checkpoint(run_dir / "pressure.pth")
+
+    assert metadata["use_physics_features"] is False
+    assert metadata["physics_feature_names"] == []
+    assert metadata["num_in"] == BASE_FEATURES
+
+    assert load_physics_normalizer(run_dir / "pressure.pth") is None
+
+
+def test_dataset_without_physics_features_still_runs(
+    simulations_without_physics, tmp_path
+):
+    """
+    The regression that mattered: the six multi-geometry datasets have
+    no physics features, and an experiment that does not ask for them
+    must not care.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations_without_physics,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_NET
+        },
+        name="smoke_legacy_dataset"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    for name in ("velocity", "pressure"):
+        assert np.isfinite(metrics["test_loss_normalized"][name])
+
+
+def test_missing_physics_features_are_refused_clearly(
+    simulations_without_physics, tmp_path
+):
+    """
+    Asking for features the dataset does not carry must say so, and say
+    which simulation is missing them.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations_without_physics,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_PHYSICS_NET
+        },
+        name="smoke_physics_missing"
+    )
+
+    with pytest.raises(ValueError, match="physics_features"):
+        run(config, tmp_path / "outputs")
 
 
 def test_sweep_runs_and_writes_a_table(simulations, tmp_path):

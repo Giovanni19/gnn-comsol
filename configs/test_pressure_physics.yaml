@@ -36,6 +36,11 @@ networks:
     features: time
     architecture: bsms
 
+    # du/dx, du/dy, dv/dx, dv/dy, div[(u . grad)u]
+    # Richiede un .mat che contenga physics_features: fra i dataset
+    # disponibili solo channel2d_physics_variables li ha.
+    use_physics_features: true
+
     # Manteniamo anche u_pred(t+1), v_pred(t+1)
     use_predicted_velocity: true
 
