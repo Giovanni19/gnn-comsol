@@ -1,5 +1,3 @@
-%% Note that this script is just explainatory, it is not running in this folder, it needs to run through the Comsol LiveLink with MATLAB
-
 %% ============================================================
 %  COMSOL -> GNN DATASET
 %
@@ -49,7 +47,7 @@ import com.comsol.model.util.*
 
 % COMSOL model
 model_file = ...
-    '\\nl-filer1\users$\giovanni\Desktop\Comsol simulations\channel2d_elliptic_cavity.mph';
+    '\\nl-filer1\users$\giovanni\Desktop\Comsol simulations\channel2d_smoother_geometric_variables.mph';
 
 % COMSOL solution dataset
 dataset_tag = 'dset1';
@@ -59,8 +57,15 @@ u_var = 'u';
 v_var = 'v';
 p_var = 'p';
 
+% COMSOL physics-derived variables
+du_dx_var   = 'du_dx';
+du_dy_var   = 'du_dy';
+dv_dx_var   = 'dv_dx';
+dv_dy_var   = 'dv_dy';
+div_conv_var = 'div_conv';
+
 % Output dataset
-output_file = 'channel2d_elliptic_cavity_gnn_dataset.mat';
+output_file = 'channel2d_physics_variables_gnn_dataset.mat';
 
 
 %% 0.3 Load COMSOL model
@@ -77,7 +82,7 @@ fprintf('========================================\n\n');
 %  1. MESH
 % ============================================================
 
-[stats, meshdata] = mphmeshstats(model);
+[stats, meshdata] = mphmeshstats(model,"mesh1");
 
 % Coordinates of geometric mesh vertices:
 %
@@ -136,6 +141,177 @@ p_nodes = mphinterp(model, p_var, ...
     'dataset', dataset_tag, ...
     'solnum', 'all');
 
+%% ============================================================
+%  TEST GEOMETRIC FEATURES
+% ============================================================
+
+geometry_dataset_tag = 'dset2';
+
+% WALL
+G_wall = mphinterp(model, 'G2', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+wall_dir_x = mphinterp(model, 'wd.Ddirx', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+wall_dir_y = mphinterp(model, 'wd.Ddiry', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+% INLET
+G_inlet = mphinterp(model, 'G3', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+inlet_dir_x = mphinterp(model, 'wd2.Ddirx', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+inlet_dir_y = mphinterp(model, 'wd2.Ddiry', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+% OUTLET
+G_outlet = mphinterp(model, 'G4', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+outlet_dir_x = mphinterp(model, 'wd3.Ddirx', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+outlet_dir_y = mphinterp(model, 'wd3.Ddiry', ...
+    'coord', P, ...
+    'dataset', geometry_dataset_tag);
+
+
+fprintf('\n========================================\n');
+fprintf('GEOMETRIC FEATURES TEST\n');
+fprintf('========================================\n');
+
+fprintf('G_wall       : %d x %d\n', size(G_wall));
+fprintf('wall_dir_x   : %d x %d\n', size(wall_dir_x));
+fprintf('wall_dir_y   : %d x %d\n', size(wall_dir_y));
+
+fprintf('G_inlet      : %d x %d\n', size(G_inlet));
+fprintf('inlet_dir_x  : %d x %d\n', size(inlet_dir_x));
+fprintf('inlet_dir_y  : %d x %d\n', size(inlet_dir_y));
+
+fprintf('G_outlet     : %d x %d\n', size(G_outlet));
+fprintf('outlet_dir_x : %d x %d\n', size(outlet_dir_x));
+fprintf('outlet_dir_y : %d x %d\n', size(outlet_dir_y));
+
+%% ============================================================
+%  BUILD GEOMETRIC FEATURES
+% ============================================================
+%
+% Static geometric features, one row per graph node.
+%
+% Columns:
+%   1 -> wall geometry x
+%   2 -> wall geometry y
+%   3 -> inlet geometry x
+%   4 -> inlet geometry y
+%   5 -> outlet geometry x
+%   6 -> outlet geometry y
+%
+% The reciprocal boundary distance G is combined with the
+% direction toward the corresponding boundary.
+% ============================================================
+
+wall_geom_x = G_wall .* wall_dir_x;
+wall_geom_y = G_wall .* wall_dir_y;
+
+inlet_geom_x = G_inlet .* inlet_dir_x;
+inlet_geom_y = G_inlet .* inlet_dir_y;
+
+outlet_geom_x = G_outlet .* outlet_dir_x;
+outlet_geom_y = G_outlet .* outlet_dir_y;
+
+
+% Force column vectors
+wall_geom_x = wall_geom_x(:);
+wall_geom_y = wall_geom_y(:);
+
+inlet_geom_x = inlet_geom_x(:);
+inlet_geom_y = inlet_geom_y(:);
+
+outlet_geom_x = outlet_geom_x(:);
+outlet_geom_y = outlet_geom_y(:);
+
+
+% Build geometric-feature matrix
+geometry_features = [
+    wall_geom_x, ...
+    wall_geom_y, ...
+    inlet_geom_x, ...
+    inlet_geom_y, ...
+    outlet_geom_x, ...
+    outlet_geom_y
+];
+
+
+geometry_feature_names = {
+    'wall_geom_x', ...
+    'wall_geom_y', ...
+    'inlet_geom_x', ...
+    'inlet_geom_y', ...
+    'outlet_geom_x', ...
+    'outlet_geom_y'
+};
+
+
+fprintf('\n========================================\n');
+fprintf('GEOMETRIC FEATURES\n');
+fprintf('========================================\n');
+
+fprintf('geometry_features: %d x %d\n', ...
+    size(geometry_features,1), ...
+    size(geometry_features,2));
+
+%% ============================================================
+%  3.1 EVALUATE PHYSICS FEATURES AT MESH NODES
+% ============================================================
+
+% du/dx
+du_dx_nodes = mphinterp(model, du_dx_var, ...
+    'coord', P, ...
+    'dataset', dataset_tag, ...
+    'solnum', 'all');
+
+% du/dy
+du_dy_nodes = mphinterp(model, du_dy_var, ...
+    'coord', P, ...
+    'dataset', dataset_tag, ...
+    'solnum', 'all');
+
+% dv/dx
+dv_dx_nodes = mphinterp(model, dv_dx_var, ...
+    'coord', P, ...
+    'dataset', dataset_tag, ...
+    'solnum', 'all');
+
+% dv/dy
+dv_dy_nodes = mphinterp(model, dv_dy_var, ...
+    'coord', P, ...
+    'dataset', dataset_tag, ...
+    'solnum', 'all');
+
+
+
+
+% Divergence of the convective acceleration
+%
+% div_conv =
+% div[(u . grad)u]
+%
+div_conv_nodes = mphinterp(model, div_conv_var, ...
+    'coord', P, ...
+    'dataset', dataset_tag, ...
+    'solnum', 'all');
+
 
 %% ============================================================
 %  4. CHECK SOLUTION DIMENSIONS
@@ -169,7 +345,49 @@ if size(p_nodes,1) ~= Nt || size(p_nodes,2) ~= N
     error('Unexpected dimensions for p_nodes.');
 end
 
+fprintf('du_dx_nodes   : %d x %d\n', ...
+    size(du_dx_nodes,1), size(du_dx_nodes,2));
 
+fprintf('du_dy_nodes   : %d x %d\n', ...
+    size(du_dy_nodes,1), size(du_dy_nodes,2));
+
+fprintf('dv_dx_nodes   : %d x %d\n', ...
+    size(dv_dx_nodes,1), size(dv_dx_nodes,2));
+
+fprintf('dv_dy_nodes   : %d x %d\n', ...
+    size(dv_dy_nodes,1), size(dv_dy_nodes,2));
+
+fprintf('div_conv_nodes: %d x %d\n\n', ...
+    size(div_conv_nodes,1), size(div_conv_nodes,2));
+
+physics_arrays = {
+    du_dx_nodes, ...
+    du_dy_nodes, ...
+    dv_dx_nodes, ...
+    dv_dy_nodes, ...
+    div_conv_nodes
+};
+
+physics_names = {
+    'du_dx_nodes', ...
+    'du_dy_nodes', ...
+    'dv_dx_nodes', ...
+    'dv_dy_nodes', ...
+    'div_conv_nodes'
+};
+
+for k = 1:length(physics_arrays)
+
+    A = physics_arrays{k};
+
+    if size(A,1) ~= Nt || size(A,2) ~= N
+        error( ...
+            'Unexpected dimensions for %s.', ...
+            physics_names{k} ...
+        );
+    end
+
+end
 %% ============================================================
 %  5. BUILD NODE-FEATURE DATASET X
 % ============================================================
@@ -197,7 +415,52 @@ fprintf('Node-feature tensor X created.\n');
 fprintf('X dimensions: %d x %d x %d\n\n', ...
     size(X,1), size(X,2), size(X,3));
 
+%% ============================================================
+%  5.1 BUILD PHYSICS-FEATURE DATASET
+% ============================================================
+%
+% physics_features dimensions:
+%
+%       Nt x N x 5
+%
+% physics_features(n,i,1) = du/dx
+% physics_features(n,i,2) = du/dy
+% physics_features(n,i,3) = dv/dx
+% physics_features(n,i,4) = dv/dy
+% physics_features(n,i,5) = div[(u . grad)u]
+%
+% ============================================================
 
+physics_features = zeros(Nt, N, 5);
+
+physics_features(:,:,1) = du_dx_nodes;
+physics_features(:,:,2) = du_dy_nodes;
+physics_features(:,:,3) = dv_dx_nodes;
+physics_features(:,:,4) = dv_dy_nodes;
+physics_features(:,:,5) = div_conv_nodes;
+
+physics_features(:,:,1) = du_dx_nodes;
+physics_features(:,:,2) = du_dy_nodes;
+physics_features(:,:,3) = dv_dx_nodes;
+physics_features(:,:,4) = dv_dy_nodes;
+physics_features(:,:,5) = div_conv_nodes;
+
+% Names corresponding to the third dimension of physics_features
+physics_feature_names = {
+    'du_dx', ...
+    'du_dy', ...
+    'dv_dx', ...
+    'dv_dy', ...
+    'div_conv'
+};
+fprintf('Physics-feature tensor created.\n');
+
+fprintf( ...
+    'physics_features dimensions: %d x %d x %d\n\n', ...
+    size(physics_features,1), ...
+    size(physics_features,2), ...
+    size(physics_features,3) ...
+);
 %% ============================================================
 %  6. EXTRACT TRIANGULAR ELEMENT CONNECTIVITY
 % ============================================================
@@ -479,13 +742,14 @@ end
 
 save(output_file, ...
     'X', ...
+    'physics_features', ...
+    'physics_feature_names', ...
     'edge_index', ...
     'edge_weight', ...
     'P', ...
     't', ...
     'h', ...
     '-v7.3');
-
 
 fprintf('\nDataset saved successfully:\n%s\n', output_file);
 
@@ -499,5 +763,41 @@ for k = 1:length(meshdata.types)
     fprintf('%s : %d elements\n', ...
         meshdata.types{k}, ...
         size(meshdata.elem{k},2));
+
+end
+
+fprintf('\nPhysics feature ranges:\n');
+
+for k = 1:size(physics_features,3)
+
+    values = physics_features(:,:,k);
+
+    fprintf( ...
+        '%-10s | min = % .6e | max = % .6e | NaN = %d | Inf = %d\n', ...
+        physics_feature_names{k}, ...
+        min(values(:)), ...
+        max(values(:)), ...
+        sum(isnan(values(:))), ...
+        sum(isinf(values(:))) ...
+    );
+
+end
+
+
+
+fprintf('\nGeometric feature ranges:\n');
+
+for k = 1:size(geometry_features,2)
+
+    values = geometry_features(:,k);
+
+    fprintf( ...
+        '%-15s | min = % .6e | max = % .6e | NaN = %d | Inf = %d\n', ...
+        geometry_feature_names{k}, ...
+        min(values(:)), ...
+        max(values(:)), ...
+        sum(isnan(values(:))), ...
+        sum(isinf(values(:))) ...
+    );
 
 end
