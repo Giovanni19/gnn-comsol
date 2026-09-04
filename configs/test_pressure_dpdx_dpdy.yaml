@@ -1,0 +1,54 @@
+name: test_pressure_dpdx_dpdy
+
+seed: 68
+
+dataset:
+  paths: 
+  - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_square_gnn_dataset.mat
+  - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_circular_cavity_gnn_dataset.mat
+  - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_elliptic_cavity_gnn_dataset.mat
+  - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_backstep_gnn_dataset.mat
+  - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_physics_variables_gnn_dataset.mat
+
+  skip_initial: 1
+
+split:
+  mode: simulation
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  num_epochs: 5
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure
+    features: time
+    architecture: bsms
+
+    use_physics_features: true
+    use_predicted_velocity: false
+
+    unet_depth: 2
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import h5py
 import numpy as np
-
+from .normalization import NUM_PHYSICS_FEATURES
 
 @dataclass
 class RawDataset:
@@ -197,9 +197,9 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
                 f"but X_input has {X_input.shape[1]}."
             )
 
-        if physics_input.shape[2] != 5:
+        if physics_input.shape[2] != NUM_PHYSICS_FEATURES:
             raise ValueError(
-                f"{file_path}: expected 5 physics features, "
+                f"{file_path}: expected {NUM_PHYSICS_FEATURES} physics features, "
                 f"got {physics_input.shape[2]}."
             )
 

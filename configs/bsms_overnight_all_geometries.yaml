@@ -1,0 +1,46 @@
+name: bsms_powerful_all_geometries
+
+seed: 68
+
+dataset:
+  paths:
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_backstep_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_circular_cavity_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_elliptic_cavity_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_gnn_dataset.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_square_gnn_dataset.mat
+
+  skip_initial: 1
+
+split:
+  mode: simulation
+  train_fraction: 0.60
+  val_fraction: 0.20
+
+training:
+  num_epochs: 500
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+
+    num_neurons: 128
+    num_layers: 5
+    dropout: 0.05
+    learning_rate: 5.0e-4
+    weight_decay: 0.0
+
+  pressure:
+    predicts: pressure
+    features: time
+    architecture: bsms
+
+    num_neurons: 128
+    num_layers: 5
+    dropout: 0.05
+    learning_rate: 5.0e-4
+    weight_decay: 0.0

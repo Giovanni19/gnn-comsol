@@ -793,10 +793,25 @@ def main():
 
     time_axis = np.cumsum(raw.delta_t)
 
-    evaluation, indices = held_out_samples(raw, config, split_mode)
+    # ===========================================================
+    # DIAGNOSTIC EVALUATION ON THE FULL SIMULATION
+    # ===========================================================
+    #
+    # We intentionally evaluate every transition, including
+    # training, validation and test portions.
+    #
+    # This is NOT a held-out generalization metric.
+    # It is used to inspect the model behaviour over the entire
+    # trajectory, especially the initial pressure transient.
+    # ===========================================================
 
-    time = time_axis[indices]
+    evaluation = raw
 
+    indices = np.arange(
+        raw.num_samples
+    )
+
+    time = time_axis
     print(
         f"  {dataset_path}\n"
         f"  {raw.num_nodes} nodes | {raw.num_edges} edges | "

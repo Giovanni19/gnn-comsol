@@ -24,7 +24,12 @@ VELOCITY_COLUMNS = slice(0, 2)
 PRESSURE_COLUMNS = slice(2, 3)
 STATE_COLUMNS = slice(0, 3)
 
-VARIABLE_NAMES = ["u", "v", "p"]
+VARIABLE_NAMES = [
+    "u",
+    "v",
+    "p",
+]
+
 PHYSICS_FEATURE_NAMES = [
     "du_dx",
     "du_dy",
