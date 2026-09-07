@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.io import savemat
 
 # Make src/ importable
 sys.path.insert(
@@ -381,6 +382,11 @@ def evaluate(
 
     num_samples = evaluation.num_samples
 
+    predictions = np.zeros(
+        (num_samples, evaluation.num_nodes, 3),
+        dtype=np.float32
+    )
+    
     rmse = {
         name: np.zeros(num_samples)
         for name in gdata.VARIABLE_NAMES
@@ -475,6 +481,8 @@ def evaluate(
                 )
             ).cpu().numpy()
 
+            predictions[timestep] = Y_pred
+
             error = Y_pred - evaluation.Y_target[timestep]
 
             pressure_absolute_error[timestep] = np.abs(error[:, 2])
@@ -493,7 +501,7 @@ def evaluate(
                     )
                 )
 
-    return rmse, pressure_absolute_error
+    return rmse, pressure_absolute_error, predictions
 
 
 def report(rmse, time):
@@ -863,7 +871,7 @@ def main():
     # Run it
     # -----------------------------------------------------------
 
-    rmse, pressure_absolute_error = evaluate(
+    rmse, pressure_absolute_error, predictions = evaluate(
         evaluation,
         velocity,
         pressure,
@@ -873,6 +881,56 @@ def main():
         hierarchy,
         device
     )
+    predictions_mat_path = Path(r"C:\Users\giovanni\.comsol\v64\llmatlab\gnn_predictions.mat")
+    print("\n========================================")
+    print("GNN PREDICTION ALIGNMENT")
+    print("========================================")
+
+    print("Number of predictions :", predictions.shape[0])
+    print("Number of delta_t     :", len(evaluation.delta_t))
+    print("Number of target times:", len(time))
+
+    print("\nFirst 5:")
+    for k in range(min(5, predictions.shape[0])):
+        print(
+            f"k={k} | dt={evaluation.delta_t[k]:.6e} "
+            f"| target time={time[k]:.6e}"
+        )
+    savemat(
+        predictions_mat_path,
+        {
+            # GNN predictions in physical units
+            "u_pred": predictions[:, :, 0],
+            "v_pred": predictions[:, :, 1],
+            "p_pred": predictions[:, :, 2],
+
+            # State given as input to the GNN
+            "u_input": evaluation.X_input[:, :, 0],
+            "v_input": evaluation.X_input[:, :, 1],
+            "p_input": evaluation.X_input[:, :, 2],
+
+            # True COMSOL target
+            "u_target": evaluation.Y_target[:, :, 0],
+            "v_target": evaluation.Y_target[:, :, 1],
+            "p_target": evaluation.Y_target[:, :, 2],
+
+            # Time information
+            "delta_t": np.asarray(evaluation.delta_t).reshape(-1, 1),
+            "target_time": np.asarray(time).reshape(-1, 1),
+
+            # Mesh-node coordinates
+            "node_coordinates": np.asarray(evaluation.pos),
+
+            # Python sample index
+            "sample_index_python": np.asarray(indices).reshape(-1, 1),
+        }
+    )
+
+    print(f"\nGNN predictions saved to: {predictions_mat_path}")
+
+    print(f"u_pred shape: {predictions[:, :, 0].shape}")
+    print(f"v_pred shape: {predictions[:, :, 1].shape}")
+    print(f"p_pred shape: {predictions[:, :, 2].shape}")
 
     report(rmse, time)
 
