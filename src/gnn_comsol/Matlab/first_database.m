@@ -47,7 +47,7 @@ import com.comsol.model.util.*
 
 % COMSOL model
 model_file = ...
-    '\\nl-filer1\users$\giovanni\Desktop\Comsol simulations\channel2d_smoother_geometric_variables.mph';
+    '\\nl-filer1\users$\giovanni\Desktop\Comsol simulations\channel2d_gnn_initial_guess_test.mph';
 
 % COMSOL solution dataset
 dataset_tag = 'dset1';
@@ -65,7 +65,7 @@ dv_dy_var   = 'dv_dy';
 div_conv_var = 'div_conv';
 
 % Output dataset
-output_file = 'channel2d_physics_variables_gnn_dataset.mat';
+output_file = 'C:\Users\giovanni\.comsol\v64\llmatlab\channel2d_physics_variables_gnn_dataset.mat';
 
 
 %% 0.3 Load COMSOL model
@@ -77,7 +77,42 @@ fprintf('COMSOL model loaded successfully.\n');
 fprintf('Model file:\n%s\n', model_file);
 fprintf('========================================\n\n');
 
+%% ============================================================
+% 0.4 RUN STUDY 1 - TIME DEPENDENT
+% ============================================================
 
+fprintf('\n========================================\n');
+fprintf('RUNNING STUDY 1 - TIME DEPENDENT\n');
+fprintf('========================================\n');
+
+tic;
+
+try
+
+    model.study('std1').run;
+
+    elapsed_time = toc;
+
+    fprintf('\n========================================\n');
+    fprintf('STUDY 1 CONVERGED\n');
+    fprintf('========================================\n');
+
+    fprintf('Elapsed time = %.6f s\n', elapsed_time);
+
+catch ME
+
+    elapsed_time = toc;
+
+    fprintf('\n========================================\n');
+    fprintf('STUDY 1 FAILED\n');
+    fprintf('========================================\n');
+
+    fprintf('Elapsed time = %.6f s\n\n', elapsed_time);
+    fprintf('%s\n', ME.message);
+
+    rethrow(ME);
+
+end
 %% ============================================================
 %  1. MESH
 % ============================================================
@@ -801,3 +836,66 @@ for k = 1:size(geometry_features,2)
     );
 
 end
+
+%%
+tags = cell(model.sol('sol1').feature().tags());
+
+fprintf('\n========================================\n');
+fprintf('SOLVER SEQUENCE\n');
+fprintf('========================================\n');
+
+for k = 1:length(tags)
+
+    tag = tags{k};
+
+    fprintf('\nFeature: %s\n', tag);
+
+    try
+        type = char(model.sol('sol1').feature(tag).getType());
+        fprintf('Type   : %s\n', type);
+    catch ME
+        fprintf('Could not retrieve type: %s\n', ME.message);
+    end
+
+end
+%%
+tags_t1 = cell(model.sol('sol1').feature('t1').feature().tags());
+
+fprintf('\n========================================\n');
+fprintf('TIME SOLVER SUBFEATURES\n');
+fprintf('========================================\n');
+
+for k = 1:length(tags_t1)
+
+    tag = tags_t1{k};
+
+    fprintf('\nFeature: %s\n', tag);
+
+    try
+        type = char( ...
+            model.sol('sol1').feature('t1').feature(tag).getType() ...
+        );
+
+        fprintf('Type   : %s\n', type);
+
+    catch ME
+
+        fprintf('Could not retrieve type: %s\n', ME.message);
+
+    end
+
+end
+
+%% ============================================================
+% 14. SAVE COMSOL MODEL WITH TIME-DEPENDENT SOLUTION
+% ============================================================
+
+fprintf('\n========================================\n');
+fprintf('SAVING COMSOL MODEL\n');
+fprintf('========================================\n');
+
+mphsave(model, model_file);
+
+fprintf('COMSOL model saved successfully.\n');
+fprintf('Time-dependent solution sol1 is now stored in:\n%s\n', ...
+    model_file);

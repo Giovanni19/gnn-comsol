@@ -795,7 +795,8 @@ def main():
 
     raw = gdata.load_data(
         dataset_path,
-        skip_initial=config["dataset"]["skip_initial"],
+        #skip_initial=config["dataset"]["skip_initial"],
+        skip_initial=0, #imponiamolo per ora cosi
         simulation_id=simulation_id
     )
 
