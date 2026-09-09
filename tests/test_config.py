@@ -293,12 +293,14 @@ def test_extra_feature_flags_default_to_off(tmp_path):
 
     for network in config["networks"].values():
         assert network["use_physics_features"] is False
+        assert network["use_geometry_features"] is False
         assert network["use_predicted_velocity"] is False
+        assert network["predict_delta"] is False
 
 
 @pytest.mark.parametrize(
     "flag",
-    ["use_physics_features", "use_predicted_velocity"]
+    ["use_physics_features", "use_geometry_features", "use_predicted_velocity"]
 )
 def test_extra_features_are_rejected_outside_bsms(tmp_path, flag):
     """
@@ -325,7 +327,7 @@ def test_extra_features_are_rejected_outside_bsms(tmp_path, flag):
 
 @pytest.mark.parametrize(
     "flag",
-    ["use_physics_features", "use_predicted_velocity"]
+    ["use_physics_features", "use_geometry_features", "use_predicted_velocity"]
 )
 def test_extra_feature_flags_must_be_boolean(tmp_path, flag):
 
@@ -350,6 +352,7 @@ def test_extra_features_are_accepted_on_bsms(tmp_path):
             "pressure": {
                 **BSMS_PRESSURE,
                 "use_physics_features": True,
+                "use_geometry_features": True,
                 "use_predicted_velocity": True
             }
         }
@@ -360,6 +363,7 @@ def test_extra_features_are_accepted_on_bsms(tmp_path):
     pressure = config["networks"]["pressure"]
 
     assert pressure["use_physics_features"] is True
+    assert pressure["use_geometry_features"] is True
     assert pressure["use_predicted_velocity"] is True
 
 
@@ -370,3 +374,73 @@ def test_invalid_skip_initial_is_rejected(tmp_path, skip):
 
     with pytest.raises(ValueError, match="skip_initial"):
         load_config(write(tmp_path, bad))
+
+
+# ---------------------------------------------------------------------
+# predict_delta
+# ---------------------------------------------------------------------
+
+def test_predict_delta_works_on_any_architecture(tmp_path):
+    """
+    Unlike use_physics_features/use_geometry_features/
+    use_predicted_velocity, predict_delta is not tied to BSMS: it only
+    changes which target array the loader builds and how the
+    prediction is reconstructed afterwards.
+    """
+
+    accepted = {
+        **BASE,
+        "networks": {
+            "velocity": {**BASE["networks"]["velocity"], "predict_delta": True},
+            "pressure": {**BASE["networks"]["pressure"], "predict_delta": True}
+        }
+    }
+
+    config = load_config(write(tmp_path, accepted))
+
+    assert config["networks"]["velocity"]["predict_delta"] is True
+    assert config["networks"]["pressure"]["predict_delta"] is True
+
+
+def test_predict_delta_must_be_boolean(tmp_path):
+
+    broken = {
+        **BASE,
+        "networks": {
+            "velocity": {**BASE["networks"]["velocity"], "predict_delta": "yes"},
+            "pressure": BASE["networks"]["pressure"]
+        }
+    }
+
+    with pytest.raises(ValueError, match="true or false"):
+        load_config(write(tmp_path, broken))
+
+
+def test_predicted_velocity_from_a_delta_velocity_network_is_rejected(
+    tmp_path
+):
+    """
+    use_predicted_velocity feeds the pressure network the velocity
+    network's raw output as if it were u(t+1), v(t+1) in normalized
+    ABSOLUTE units. If the velocity network predicts the increment
+    instead, that raw output is a delta, not an absolute velocity - a
+    silent physics bug this combination must be refused before it can
+    be trained.
+    """
+
+    broken = {
+        **BASE,
+        "networks": {
+            "velocity": {
+                **BASE["networks"]["velocity"],
+                "predict_delta": True
+            },
+            "pressure": {
+                **BSMS_PRESSURE,
+                "use_predicted_velocity": True
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="predict_delta=true"):
+        load_config(write(tmp_path, broken))

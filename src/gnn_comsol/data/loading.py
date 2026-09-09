@@ -7,11 +7,17 @@ therefore read with h5py.
 
 Expected contents
 -----------------
-X            (3, N, T)   state per node and timestep, as MATLAB stores it
-edge_index   (2, E)      mesh connectivity, zero-based node indices
-edge_weight  (E,)        weight of each edge
-t            (T,)        simulation time of each snapshot
-h            scalar/array  local mesh size
+X                  (3, N, T)   state per node and timestep, as MATLAB
+                               stores it
+edge_index         (2, E)      mesh connectivity, zero-based node
+                               indices
+edge_weight        (E,)        weight of each edge
+t                  (T,)        simulation time of each snapshot
+h                  scalar/array  local mesh size
+physics_features   (5, N, T)   optional, per node and timestep
+geometry_features  (N, 6) or (6, N)   optional, static per node -
+                               NOT indexed by time, unlike
+                               physics_features
 
 The state carries three variables per node, in this order:
     0 -> u   horizontal velocity
@@ -23,7 +29,7 @@ from dataclasses import dataclass
 
 import h5py
 import numpy as np
-from .normalization import NUM_PHYSICS_FEATURES
+from .normalization import NUM_GEOMETRY_FEATURES, NUM_PHYSICS_FEATURES
 
 @dataclass
 class RawDataset:
@@ -52,6 +58,12 @@ class RawDataset:
 
     h : array
         Mesh size information, currently carried around but unused.
+
+    geometry_features : (N, NUM_GEOMETRY_FEATURES) or None
+        Static per-node boundary distance/direction features (wall,
+        inlet, outlet). One row per mesh node - NOT indexed by time,
+        unlike physics_features. None for datasets generated before
+        this feature existed.
     """
 
     X_input: np.ndarray
@@ -62,6 +74,7 @@ class RawDataset:
     h: np.ndarray
     pos: np.ndarray
     physics_features: np.ndarray | None = None
+    geometry_features: np.ndarray | None = None
     simulation_id: int | None = None
     file_path: str | None = None
 
@@ -130,6 +143,13 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             )
         else:
             physics_features = None
+
+        if "geometry_features" in f:
+            geometry_features = np.array(
+                f["geometry_features"]
+            )
+        else:
+            geometry_features = None
 
     # MATLAB stores arrays in Fortran order: (3, N, T) -> (T, N, 3)
     X = np.transpose(X, (2, 1, 0))
@@ -221,6 +241,36 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             f"but the state has {num_nodes} nodes."
         )
 
+    # ------------------------------------------------------------
+    # Geometry features: static per node, not per timestep.
+    # ------------------------------------------------------------
+    if geometry_features is not None:
+
+        # Saved by MATLAB as (N, NUM_GEOMETRY_FEATURES); HDF5/h5py may
+        # hand it back transposed, exactly like P above.
+        if geometry_features.shape[0] == num_nodes:
+            pass
+        elif geometry_features.shape[1] == num_nodes:
+            geometry_features = geometry_features.T
+        else:
+            raise ValueError(
+                f"{file_path}: geometry_features has shape "
+                f"{geometry_features.shape}, but the state has "
+                f"{num_nodes} nodes."
+            )
+
+        if geometry_features.shape[1] != NUM_GEOMETRY_FEATURES:
+            raise ValueError(
+                f"{file_path}: expected {NUM_GEOMETRY_FEATURES} "
+                f"geometry features, got {geometry_features.shape[1]}."
+            )
+
+        if not np.all(np.isfinite(geometry_features)):
+            raise ValueError(
+                f"{file_path}: geometry_features contain "
+                f"NaN or Inf values."
+            )
+
     if edge_index.min() < 0:
         raise ValueError(
             f"{file_path}: edge_index contains negative indices."
@@ -241,6 +291,7 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
         h=h,
         pos=pos,
         physics_features=physics_input,
+        geometry_features=geometry_features,
         simulation_id=simulation_id,
         file_path=str(file_path)
     )

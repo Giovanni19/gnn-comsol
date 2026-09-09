@@ -15,7 +15,10 @@ import h5py
 import numpy as np
 import pytest
 
-from gnn_comsol.data.normalization import NUM_PHYSICS_FEATURES
+from gnn_comsol.data.normalization import (
+    NUM_GEOMETRY_FEATURES,
+    NUM_PHYSICS_FEATURES
+)
 
 
 def grid_mesh(rows, cols, spacing=1.0):
@@ -60,7 +63,8 @@ def write_dataset(
     seed=0,
     marker_snapshots=False,
     transpose_positions=False,
-    with_physics=True
+    with_physics=True,
+    with_geometry=True
 ):
     """
     Write one synthetic simulation in the layout load_data expects.
@@ -85,6 +89,11 @@ def write_dataset(
         datasets predate the feature and the MATLAB generator in this
         repository still does not produce it, so a run must work without
         it and must fail clearly when a config asks for it anyway.
+
+    with_geometry : bool
+        Include the geometry_features array. True by default, for the
+        same reason as with_physics. Pass False for the older,
+        pre-geometry-features layout.
 
     Returns
     -------
@@ -138,6 +147,21 @@ def write_dataset(
             * scales
         )
 
+    # Static per-node boundary distance/direction features (wall,
+    # inlet, outlet): one row per node, NOT per timestep - unlike
+    # physics_features. Deliberately different scales per column, same
+    # reason as physics_features.
+    geometry_features = None
+
+    if with_geometry:
+
+        geometry_scales = np.array([1.0, 1.0, 10.0, 10.0, 0.1, 0.1])
+
+        geometry_features = (
+            rng.normal(size=(num_nodes, NUM_GEOMETRY_FEATURES))
+            * geometry_scales
+        )
+
     with h5py.File(path, "w") as f:
         # MATLAB axis order: load_data transposes (3, N, T) -> (T, N, 3)
         f["X"] = np.transpose(X, (2, 1, 0))
@@ -153,6 +177,11 @@ def write_dataset(
                 physics_features, (2, 1, 0)
             )
 
+        if geometry_features is not None:
+            # Written as (N, NUM_GEOMETRY_FEATURES): load_data accepts
+            # this orientation directly, no transpose needed.
+            f["geometry_features"] = geometry_features
+
     return {
         "path": path,
         "X": X,
@@ -160,6 +189,7 @@ def write_dataset(
         "edge_index": edge_index,
         "pos": pos,
         "physics_features": physics_features,
+        "geometry_features": geometry_features,
         "num_nodes": num_nodes,
         "num_edges": edge_index.shape[1],
         "num_snapshots": num_snapshots

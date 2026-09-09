@@ -261,14 +261,32 @@ def uses_physics_features(config):
     )
 
 
+def uses_geometry_features(config):
+    """True when some network in the experiment asked for them."""
+
+    return any(
+        network["use_geometry_features"]
+        for network in config["networks"].values()
+    )
+
+
+def uses_delta_prediction(config):
+    """True when some network in the experiment predicts the increment."""
+
+    return any(
+        network["predict_delta"]
+        for network in config["networks"].values()
+    )
+
+
 def build_normalizer(train_simulations, config):
     """
     The scalings, fitted on the TRAINING block only.
 
-    The physics normalizer is built only when the configuration asks for
-    physics features. A dataset without them is otherwise perfectly
-    usable: the six multi-geometry .mat files predate the feature, and
-    the MATLAB generator in this repository does not produce it yet.
+    The physics and geometry normalizers are built only when the
+    configuration asks for the corresponding features. A dataset
+    without them is otherwise perfectly usable: older .mat files predate
+    both features.
     """
 
     # =========================================================
@@ -315,9 +333,55 @@ def build_normalizer(train_simulations, config):
 
         print(f"\n{physics_normalizer}")
 
+    # =========================================================
+    # Geometry-feature normalization, only if requested
+    # =========================================================
+
+    geometry_normalizer = None
+
+    if uses_geometry_features(config):
+
+        geometry_mean, geometry_std = (
+            gdata
+            .compute_multi_simulation_geometry_normalization_parameters(
+                train_simulations
+            )
+        )
+
+        geometry_normalizer = gdata.GeometryNormalizer(
+            geometry_mean,
+            geometry_std,
+        )
+
+        print(f"\n{geometry_normalizer}")
+
+    # =========================================================
+    # Delta normalization, only if requested
+    # =========================================================
+
+    delta_normalizer = None
+
+    if uses_delta_prediction(config):
+
+        delta_mean, delta_std = (
+            gdata
+            .compute_multi_simulation_delta_normalization_parameters(
+                train_simulations
+            )
+        )
+
+        delta_normalizer = gdata.StateNormalizer(
+            delta_mean,
+            delta_std,
+        )
+
+        print(f"\ndelta {delta_normalizer}")
+
     return (
         normalizer,
         physics_normalizer,
+        geometry_normalizer,
+        delta_normalizer,
         dt_mean,
         dt_std,
     )
@@ -327,17 +391,21 @@ def normalize_all_splits(
     splits,
     normalizer,
     physics_normalizer,
+    geometry_normalizer,
+    delta_normalizer,
     dt_mean,
     dt_std,
 ):
     """
     Split name -> list of normalized simulations.
 
-    State and physics-derived features use separate normalizers, because
-    they live in different units and on very different scales. Both were
-    fitted using TRAINING DATA ONLY. physics_normalizer is None when the
-    experiment does not ask for physics features, and in that case the
-    normalized simulations simply do not carry them.
+    State, physics-derived, geometry-derived and delta features use
+    separate normalizers, because they live in different units and on
+    very different scales. All were fitted using TRAINING DATA ONLY.
+    physics_normalizer / geometry_normalizer / delta_normalizer are
+    None when the experiment does not ask for the corresponding
+    features, and in that case the normalized simulations simply do not
+    carry them.
     """
 
     blocks = {
@@ -357,6 +425,8 @@ def normalize_all_splits(
                 dt_mean,
                 dt_std,
                 physics_normalizer=physics_normalizer,
+                geometry_normalizer=geometry_normalizer,
+                delta_normalizer=delta_normalizer,
             )
             for simulation in split_simulations
         ]
@@ -544,6 +614,10 @@ def build_velocity_loaders(normalized, config):
 
     batch_size = config["training"]["batch_size"]
 
+    target_key = (
+        "delta" if velocity_network["predict_delta"] else "Y"
+    )
+
     velocity_loaders = {}
 
     for split_name in ("train", "val", "test"):
@@ -552,6 +626,7 @@ def build_velocity_loaders(normalized, config):
             gdata.create_multi_simulation_graph_dataset(
                 normalized[split_name],
                 velocity_network["features"],
+                target_key=target_key,
             )
         )
 
@@ -575,6 +650,7 @@ def pressure_features_size(network):
     return gdata.pressure_features_size(
         network["features"],
         use_physics_features=network["use_physics_features"],
+        use_geometry_features=network["use_geometry_features"],
         use_predicted_velocity=network["use_predicted_velocity"],
     )
 
@@ -609,7 +685,13 @@ def build_pressure_loaders(
 
     use_physics_features = pressure_network["use_physics_features"]
 
+    use_geometry_features = pressure_network["use_geometry_features"]
+
     use_predicted_velocity = pressure_network["use_predicted_velocity"]
+
+    target_key = (
+        "delta" if pressure_network["predict_delta"] else "Y"
+    )
 
     batch_size = config["training"]["batch_size"]
 
@@ -663,6 +745,11 @@ def build_pressure_loaders(
                         if use_physics_features
                         else None
                     ),
+                    geometry_features=(
+                        simulation["geometry_features"]
+                        if use_geometry_features
+                        else None
+                    ),
                     predicted_velocity=predicted_velocity,
                 )
 
@@ -674,7 +761,7 @@ def build_pressure_loaders(
 
             pressure_dataset = gdata.create_bsms_dataset(
                 features,
-                simulation["Y"],
+                simulation[target_key],
             )
 
             pressure_loaders[
@@ -872,6 +959,8 @@ def train_all_networks(
     bsms_hierarchies,
     normalizer,
     physics_normalizer,
+    geometry_normalizer,
+    delta_normalizer,
     dt_mean,
     dt_std,
     run_dir,
@@ -947,17 +1036,28 @@ def train_all_networks(
         checkpoint_path = run_dir / f"{network_name}.pth"
 
         uses_physics = network["use_physics_features"]
+        uses_geometry = network["use_geometry_features"]
+        predicts_delta = network["predict_delta"]
 
         save_checkpoint(
             checkpoint_path,
             best["model"],
             normalizer,
 
-            # Only the networks that were actually fed physics features
-            # need their scaling; storing it on the others would suggest
-            # they use features they never saw.
+            # Only the networks that were actually fed physics/geometry
+            # features, or that predict the increment, need the
+            # corresponding scaling; storing it on the others would
+            # suggest they use something they never saw.
             physics_normalizer=(
                 physics_normalizer if uses_physics else None
+            ),
+
+            geometry_normalizer=(
+                geometry_normalizer if uses_geometry else None
+            ),
+
+            delta_normalizer=(
+                delta_normalizer if predicts_delta else None
             ),
 
             # Every network is fed the normalized time step, so every
@@ -977,6 +1077,16 @@ def train_all_networks(
                     if uses_physics
                     else []
                 ),
+
+                "use_geometry_features": uses_geometry,
+
+                "geometry_feature_names": (
+                    gdata.GEOMETRY_FEATURE_NAMES
+                    if uses_geometry
+                    else []
+                ),
+
+                "predict_delta": predicts_delta,
 
                 "use_predicted_velocity": network[
                     "use_predicted_velocity"
@@ -1036,6 +1146,8 @@ def train_all_networks(
             "columns": columns,
             "features": network["features"],
             "use_physics_features": network["use_physics_features"],
+            "use_geometry_features": network["use_geometry_features"],
+            "predict_delta": network["predict_delta"],
             "use_predicted_velocity": network[
                 "use_predicted_velocity"
             ],
@@ -1139,6 +1251,8 @@ def main():
     (
         normalizer,
         physics_normalizer,
+        geometry_normalizer,
+        delta_normalizer,
         dt_mean,
         dt_std,
     ) = build_normalizer(
@@ -1150,6 +1264,8 @@ def main():
         splits,
         normalizer,
         physics_normalizer,
+        geometry_normalizer,
+        delta_normalizer,
         dt_mean,
         dt_std,
     )
@@ -1157,7 +1273,7 @@ def main():
     bsms_hierarchies = build_bsms_hierarchies(simulations, config)
 
     velocity_loaders = build_velocity_loaders(normalized, config)
-    
+
 
     trained, sweep_rows = train_all_networks(
         config,
@@ -1166,6 +1282,8 @@ def main():
         bsms_hierarchies,
         normalizer,
         physics_normalizer,
+        geometry_normalizer,
+        delta_normalizer,
         dt_mean,
         dt_std,
         run_dir,

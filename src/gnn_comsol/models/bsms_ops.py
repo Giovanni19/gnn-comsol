@@ -1,3 +1,23 @@
+"""
+Bi-Stride Graph Message Passing (BSGMP) building blocks.
+
+Adapted from Eydcao/BSMS-GNN (Apache License 2.0):
+https://github.com/Eydcao/BSMS-GNN
+Verified against commit accc09213cf94cdd56c416d4a047e4f6cda3b0a3 of
+`main` (2024-08-16) - the exact commit this was originally copied from
+was not recorded, so this is the closest reproducible reference.
+
+Corresponds to (upstream splits this across two files):
+    src/ops/BSMS.py    -> BSGMP
+    src/ops/basic.py   -> MLP, GMP, WeightedEdgeConv, Unpool
+
+Notable changes from upstream: the two files above were merged into
+this one; the BSGMP constructor argument `hidden_layer` was renamed to
+`hidden_layers`. No functional change to the message-passing or
+pooling logic. See THIRD_PARTY_NOTICES.md at the repository root for
+the full license text and the paper to cite if you use this code.
+"""
+
 import torch
 import torch.nn as nn
 

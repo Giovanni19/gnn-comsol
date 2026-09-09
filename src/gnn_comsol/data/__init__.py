@@ -37,7 +37,13 @@ from .normalization import (
     NUM_PHYSICS_FEATURES,
     PhysicsNormalizer,
     compute_physics_normalization_parameters,
-    compute_multi_simulation_physics_normalization_parameters
+    compute_multi_simulation_physics_normalization_parameters,
+    GEOMETRY_FEATURE_NAMES,
+    NUM_GEOMETRY_FEATURES,
+    GeometryNormalizer,
+    compute_geometry_normalization_parameters,
+    compute_multi_simulation_geometry_normalization_parameters,
+    compute_multi_simulation_delta_normalization_parameters
 )
 
 from .splitting import (
@@ -93,4 +99,10 @@ __all__ = [
     "PhysicsNormalizer",
     "compute_physics_normalization_parameters",
     "compute_multi_simulation_physics_normalization_parameters",
+    "NUM_GEOMETRY_FEATURES",
+    "GEOMETRY_FEATURE_NAMES",
+    "GeometryNormalizer",
+    "compute_geometry_normalization_parameters",
+    "compute_multi_simulation_geometry_normalization_parameters",
+    "compute_multi_simulation_delta_normalization_parameters",
 ]

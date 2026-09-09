@@ -36,7 +36,9 @@ networks:
     unet_depth: int          # BSMS only
     hidden_layers: int       # BSMS only
     use_physics_features: bool      # BSMS only, default False
+    use_geometry_features: bool     # BSMS only, default False
     use_predicted_velocity: bool    # BSMS only, default False
+    predict_delta: bool             # any architecture, default False
 
 Any of the last five may be a list, in which case every combination is
 trained and the one with the lowest validation loss is kept.
@@ -97,7 +99,16 @@ NETWORK_DEFAULTS = {
     # network instead would make renaming a network in the YAML silently
     # change the architecture.
     "use_physics_features": False,
-    "use_predicted_velocity": False
+    "use_geometry_features": False,
+    "use_predicted_velocity": False,
+
+    # Whether this network predicts the one-step increment
+    # Y_target - X_input instead of the absolute next state. Works with
+    # any architecture: unlike the three flags above it is not tied to
+    # the BSMS pressure input layout, only to which target array the
+    # loader hands the network and how the prediction is reconstructed
+    # back into an absolute state afterwards.
+    "predict_delta": False,
 }
 
 BSMS_DEFAULTS = {
@@ -275,11 +286,15 @@ def _validate(config, path):
                     "hidden_layers >= 1."
                 )
 
-        # Extra input features. Both are wired into the loader that
-        # feeds the BSMS network only, so allowing them elsewhere would
-        # build a model with more input channels than the loader
+        # Extra input features. All three are wired into the loader
+        # that feeds the BSMS network only, so allowing them elsewhere
+        # would build a model with more input channels than the loader
         # supplies and fail at the first forward pass.
-        for flag in ("use_physics_features", "use_predicted_velocity"):
+        for flag in (
+            "use_physics_features",
+            "use_geometry_features",
+            "use_predicted_velocity",
+        ):
 
             if not isinstance(merged[flag], bool):
                 raise ValueError(
@@ -295,7 +310,39 @@ def _validate(config, path):
                     "the BSMS pressure path."
                 )
 
+        # Not tied to any architecture: it only changes which target
+        # array the loader hands the network and how the prediction is
+        # reconstructed back into an absolute state at inference time.
+        if not isinstance(merged["predict_delta"], bool):
+            raise ValueError(
+                f"{path}: network {name!r} has "
+                f"predict_delta={merged['predict_delta']!r}; it must be "
+                "true or false."
+            )
+
         coverage[TARGET_COLUMNS[predicts]] += 1
+
+    # use_predicted_velocity assumes the velocity network's raw output
+    # is already u(t+1), v(t+1) in normalized ABSOLUTE-state units. If
+    # the velocity network predicts the increment instead, that
+    # assumption is false: predict_velocity_for_simulation does not
+    # reconstruct an absolute velocity from a predicted increment, so
+    # this combination would silently feed a delta into the pressure
+    # network as if it were an absolute velocity - a physics bug, not a
+    # shape mismatch a forward pass would catch.
+    if "velocity" in networks and networks["velocity"]["predict_delta"]:
+
+        for name, network in networks.items():
+
+            if network["use_predicted_velocity"]:
+                raise ValueError(
+                    f"{path}: network {name!r} sets "
+                    "use_predicted_velocity=true, but the velocity "
+                    "network has predict_delta=true. Predicted velocity "
+                    "features are not currently reconstructed back to "
+                    "an absolute state before being fed to another "
+                    "network."
+                )
 
     allow_partial_state = config.get(
         "allow_partial_state",

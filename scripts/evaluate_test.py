@@ -363,10 +363,82 @@ def evaluate(
             evaluation.physics_features
         )
 
+    # -----------------------------------------------------------
+    # Geometry-derived features, scaled the way training scaled them
+    #
+    # Static per node (not per timestep), so no per-timestep slicing
+    # is needed - build_pressure_features broadcasts it internally.
+    # -----------------------------------------------------------
+
+    uses_geometry = pressure.metadata.get("use_geometry_features", False)
+
+    geometry_norm = None
+
+    if uses_geometry:
+
+        if evaluation.geometry_features is None:
+            raise ValueError(
+                "The pressure network was trained on geometry-derived "
+                "features, but this dataset does not contain any. It "
+                "expects "
+                f"{pressure.metadata.get('geometry_feature_names')}."
+            )
+
+        if pressure.geometry_normalizer is None:
+            raise ValueError(
+                "The pressure checkpoint says it uses geometry "
+                "features but does not carry their scaling, so they "
+                "cannot be reproduced. Retrain with the current code."
+            )
+
+        geometry_norm = pressure.geometry_normalizer.transform(
+            evaluation.geometry_features
+        )
+
     uses_predicted_velocity = pressure.metadata.get(
         "use_predicted_velocity",
         False
     )
+
+    # -----------------------------------------------------------
+    # Delta prediction: the network's raw output is a normalized
+    # INCREMENT, not the normalized absolute next state. It must be
+    # de-scaled with its own delta_normalizer and added to the physical
+    # input state, never inverse-transformed with `normalizer` as if it
+    # were an absolute value.
+    # -----------------------------------------------------------
+
+    velocity_predicts_delta = velocity.metadata.get(
+        "predict_delta", False
+    )
+
+    pressure_predicts_delta = pressure.metadata.get(
+        "predict_delta", False
+    )
+
+    if velocity_predicts_delta and velocity.delta_normalizer is None:
+        raise ValueError(
+            "The velocity network was trained with predict_delta=true, "
+            "but its checkpoint does not carry a delta normalizer. "
+            "Retrain with the current code."
+        )
+
+    if pressure_predicts_delta and pressure.delta_normalizer is None:
+        raise ValueError(
+            "The pressure network was trained with predict_delta=true, "
+            "but its checkpoint does not carry a delta normalizer. "
+            "Retrain with the current code."
+        )
+
+    if uses_predicted_velocity and velocity_predicts_delta:
+        raise ValueError(
+            "The pressure network uses predicted velocity, but the "
+            "velocity network was trained with predict_delta=true. "
+            "Predicted velocity features are not reconstructed back to "
+            "an absolute state before being fed to the pressure "
+            "network - this checkpoint should have been rejected by "
+            "config validation at training time."
+        )
 
     edge_index = torch.as_tensor(
         evaluation.edge_index,
@@ -447,6 +519,7 @@ def evaluate(
                     if physics_norm is not None
                     else None
                 ),
+                geometry_features=geometry_norm,
                 predicted_velocity=predicted_velocity
             )[0]
 
@@ -472,13 +545,57 @@ def evaluate(
 
             # ---------------------------------------------------
             # Back to physical units
+            #
+            # Velocity and pressure are reconstructed independently,
+            # because one may predict the absolute next state and the
+            # other the increment. COMSOL always gets the absolute
+            # field: a delta is added to the physical input state
+            # here, never handed on as-is.
             # ---------------------------------------------------
 
-            Y_pred = normalizer.inverse_transform(
-                torch.cat(
-                    [velocity_pred_norm, pressure_pred_norm],
-                    dim=-1
+            X_prev_physical = torch.as_tensor(
+                evaluation.X_input[timestep],
+                dtype=torch.float32,
+                device=device
+            )
+
+            if velocity_predicts_delta:
+
+                velocity_pred_phys = (
+                    X_prev_physical[:, gdata.VELOCITY_COLUMNS]
+                    + velocity.delta_normalizer.inverse_transform(
+                        velocity_pred_norm,
+                        columns=gdata.VELOCITY_COLUMNS
+                    )
                 )
+
+            else:
+
+                velocity_pred_phys = normalizer.inverse_transform(
+                    velocity_pred_norm,
+                    columns=gdata.VELOCITY_COLUMNS
+                )
+
+            if pressure_predicts_delta:
+
+                pressure_pred_phys = (
+                    X_prev_physical[:, gdata.PRESSURE_COLUMNS]
+                    + pressure.delta_normalizer.inverse_transform(
+                        pressure_pred_norm,
+                        columns=gdata.PRESSURE_COLUMNS
+                    )
+                )
+
+            else:
+
+                pressure_pred_phys = normalizer.inverse_transform(
+                    pressure_pred_norm,
+                    columns=gdata.PRESSURE_COLUMNS
+                )
+
+            Y_pred = torch.cat(
+                [velocity_pred_phys, pressure_pred_phys],
+                dim=-1
             ).cpu().numpy()
 
             predictions[timestep] = Y_pred

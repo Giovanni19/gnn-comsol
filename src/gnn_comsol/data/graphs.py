@@ -105,12 +105,20 @@ def create_bsms_dataset(X, Y, delta_t=None):
 def create_multi_simulation_graph_dataset(
     simulations,
     encoding,
+    target_key="Y",
 ):
     """
     Build one PyG dataset from multiple simulations.
 
     Each timestep transition becomes an independent PyG Data object.
     Simulations may have different numbers of nodes and edges.
+
+    target_key : str
+        Which entry of each normalized simulation dict to use as the
+        target: "Y" for the absolute next state (the default), "delta"
+        for the one-step increment (a network configured with
+        `predict_delta: true` - normalize_simulation only populates
+        "delta" when it was given a delta_normalizer).
     """
 
     dataset = []
@@ -125,7 +133,7 @@ def create_multi_simulation_graph_dataset(
 
         simulation_dataset = create_graph_dataset(
             features,
-            simulation["Y"],
+            simulation[target_key],
             simulation["edge_index"],
             simulation["edge_weight"],
         )

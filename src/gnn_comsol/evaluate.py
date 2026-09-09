@@ -129,6 +129,16 @@ def predict_next_timestep(
     its input is augmented with the normalized predictions
     u_hat(t+1), v_hat(t+1).
 
+    CAVEAT - not currently called from anywhere (see the note in
+    scripts/run_experiment.py): it assembles every network's raw
+    output into one `prediction_norm` array and applies a single
+    combined `normalizer.inverse_transform` at the end, which assumes
+    every network predicts the absolute next state. A network trained
+    with `predict_delta: true` would need its own delta_normalizer and
+    to have its physical increment added to `X` for that column group,
+    the way scripts/evaluate_test.py.evaluate() does it - fix this
+    before wiring this function back in for such a network.
+
     Returns
     -------
     (N, 3) array in physical units.

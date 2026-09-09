@@ -24,6 +24,8 @@ import pytest
 import yaml
 
 from gnn_comsol.data.normalization import (
+    GEOMETRY_FEATURE_NAMES,
+    NUM_GEOMETRY_FEATURES,
     NUM_PHYSICS_FEATURES,
     PHYSICS_FEATURE_NAMES
 )
@@ -48,10 +50,10 @@ def simulations(make_dataset):
 @pytest.fixture
 def simulations_without_physics(make_dataset):
     """
-    The same four, in the layout that predates physics features.
+    The same four, in the layout that predates physics AND geometry
+    features - neither is present.
 
-    This is what the six multi-geometry .mat files look like, and what
-    the MATLAB generator in this repository still produces.
+    This is what the six multi-geometry .mat files look like.
     """
 
     return [
@@ -60,7 +62,8 @@ def simulations_without_physics(make_dataset):
             cols=cols,
             seed=index,
             num_snapshots=14,
-            with_physics=False
+            with_physics=False,
+            with_geometry=False
         )
         for index, (rows, cols) in enumerate(MESHES)
     ]
@@ -93,6 +96,11 @@ PRESSURE_BSMS_NET = {
 PRESSURE_BSMS_PHYSICS_NET = {
     **PRESSURE_BSMS_NET,
     "use_physics_features": True
+}
+
+PRESSURE_BSMS_GEOMETRY_NET = {
+    **PRESSURE_BSMS_NET,
+    "use_geometry_features": True
 }
 
 # "time" is 4 features: u, v, p, dt
@@ -161,6 +169,25 @@ def run(config_path, output_root):
     assert len(runs) == 1, f"expected one run directory, got {runs}"
 
     return runs[0]
+
+
+def load_evaluate_test_module():
+    """
+    Import scripts/evaluate_test.py as a module, without running its
+    main(): main() writes gnn_predictions.mat to a hardcoded Windows
+    path, which does not exist off the machine that path was written
+    for. Its individual functions (build_from_checkpoint, evaluate,
+    ...) have no such assumption and are what this module needs.
+    """
+
+    spec = importlib.util.spec_from_file_location(
+        "evaluate_test_module", REPO / "scripts" / "evaluate_test.py"
+    )
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    return module
 
 
 def test_velocity_only_experiment_runs(simulations, tmp_path):
@@ -529,6 +556,132 @@ def test_missing_physics_features_are_refused_clearly(
         run(config, tmp_path / "outputs")
 
 
+# ---------------------------------------------------------------------
+# Geometry-derived input features
+#
+# Static per-node features (not per timestep), mirroring the three
+# physics-features cases above: with, without, and asked-for-but-missing.
+# ---------------------------------------------------------------------
+
+def test_pressure_uses_geometry_features_when_asked(
+    simulations, tmp_path
+):
+    """The flag widens the model and the checkpoint records it."""
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_GEOMETRY_NET
+        },
+        name="smoke_geometry"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    from gnn_comsol.checkpoints import (
+        load_geometry_normalizer,
+        read_checkpoint
+    )
+
+    bundle = read_checkpoint(run_dir / "pressure.pth")
+
+    metadata = bundle.metadata
+
+    assert metadata["use_geometry_features"] is True
+    assert metadata["geometry_feature_names"] == GEOMETRY_FEATURE_NAMES
+    assert metadata["num_in"] == BASE_FEATURES + NUM_GEOMETRY_FEATURES
+
+    # The scaling of the geometry features must travel with the weights
+    # for the same reason the physics-feature scaling does.
+    geometry_normalizer = load_geometry_normalizer(
+        run_dir / "pressure.pth",
+        required=True
+    )
+
+    assert geometry_normalizer.mean.shape == (NUM_GEOMETRY_FEATURES,)
+    assert np.all(geometry_normalizer.std > 0)
+
+    assert np.allclose(
+        bundle.geometry_normalizer.mean, geometry_normalizer.mean
+    )
+
+    # The velocity network was not fed them, so it must not claim to
+    # carry their scaling.
+    velocity_bundle = read_checkpoint(run_dir / "velocity.pth")
+
+    assert velocity_bundle.metadata["use_geometry_features"] is False
+    assert velocity_bundle.geometry_normalizer is None
+    assert load_geometry_normalizer(run_dir / "velocity.pth") is None
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    for name in ("velocity", "pressure"):
+        assert np.isfinite(metrics["test_loss_normalized"][name])
+
+
+def test_geometry_features_are_off_unless_requested(
+    simulations, tmp_path
+):
+    """
+    A dataset that HAS geometry features must not get them silently.
+
+    The width of the model is part of the experiment, so it has to
+    follow the configuration and not what happens to be in the .mat.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_NET
+        },
+        name="smoke_no_geometry_flag"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    from gnn_comsol.checkpoints import (
+        load_checkpoint,
+        load_geometry_normalizer
+    )
+
+    _, _, metadata = load_checkpoint(run_dir / "pressure.pth")
+
+    assert metadata["use_geometry_features"] is False
+    assert metadata["geometry_feature_names"] == []
+    assert metadata["num_in"] == BASE_FEATURES
+
+    assert load_geometry_normalizer(run_dir / "pressure.pth") is None
+
+
+def test_missing_geometry_features_are_refused_clearly(
+    simulations_without_physics, tmp_path
+):
+    """
+    Asking for features the dataset does not carry must say so, and say
+    which simulation is missing them.
+
+    Reuses simulations_without_physics: that fixture also has no
+    geometry_features (see its docstring).
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations_without_physics,
+        networks={
+            "velocity": VELOCITY_NET,
+            "pressure": PRESSURE_BSMS_GEOMETRY_NET
+        },
+        name="smoke_geometry_missing"
+    )
+
+    with pytest.raises(ValueError, match="geometry_features"):
+        run(config, tmp_path / "outputs")
+
+
 def test_sweep_runs_and_writes_a_table(simulations, tmp_path):
 
     config = write_config(
@@ -639,3 +792,130 @@ def test_legacy_checkpoint_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="no normalizer"):
         load_checkpoint(path)
+
+
+# ---------------------------------------------------------------------
+# predict_delta
+# ---------------------------------------------------------------------
+
+def test_predict_delta_reconstructs_the_absolute_field(
+    simulations, tmp_path
+):
+    """
+    predict_delta must never leak a raw increment downstream.
+
+    evaluate() - the exact function evaluate_test.py calls to build the
+    predictions handed to COMSOL - has to return the ABSOLUTE state: the
+    physical input state plus the de-scaled predicted increment.
+
+    Pressure has base scale ~500 in the synthetic data (conftest.py's
+    `base[:, 2] *= 500.0`), while a one-step increment is a couple of
+    percent of that. A bug that forgot to add the physical input state
+    back (e.g. inverse-transforming with the wrong normalizer, or
+    skipping the addition) would return values on the increment's tiny
+    scale instead of the field's - and this tells the two apart even
+    with the undertrained, near-random network two epochs produce.
+    """
+
+    import torch
+
+    from gnn_comsol import data as gdata
+    from gnn_comsol.checkpoints import read_checkpoint
+    from gnn_comsol.graph.bsms import BistrideMultiLayerGraph
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {**VELOCITY_NET, "predict_delta": True},
+            "pressure": {**PRESSURE_BSMS_NET, "predict_delta": True}
+        },
+        name="smoke_delta"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    velocity_bundle = read_checkpoint(run_dir / "velocity.pth")
+    pressure_bundle = read_checkpoint(run_dir / "pressure.pth")
+
+    assert velocity_bundle.metadata["predict_delta"] is True
+    assert pressure_bundle.metadata["predict_delta"] is True
+
+    assert velocity_bundle.delta_normalizer is not None
+    assert pressure_bundle.delta_normalizer is not None
+
+    # ------------------------------------------------------------
+    # Run the exact reconstruction evaluate_test.py uses for COMSOL
+    # ------------------------------------------------------------
+
+    evaluate_test = load_evaluate_test_module()
+
+    device = torch.device("cpu")
+
+    velocity = evaluate_test.build_from_checkpoint(
+        run_dir / "velocity.pth", device
+    )
+
+    pressure = evaluate_test.build_from_checkpoint(
+        run_dir / "pressure.pth", device
+    )
+
+    exp_config, metrics = evaluate_test.read_run(run_dir)
+
+    dataset_path, simulation_id = evaluate_test.choose_test_simulation(
+        exp_config, metrics, None
+    )
+
+    raw = gdata.load_data(
+        dataset_path, skip_initial=0, simulation_id=simulation_id
+    )
+
+    evaluation, _ = evaluate_test.held_out_samples(
+        raw, exp_config, metrics["split_mode"]
+    )
+
+    multi_layer_graph = BistrideMultiLayerGraph(
+        evaluation.edge_index,
+        pressure.metadata["unet_depth"],
+        evaluation.num_nodes,
+        evaluation.pos
+    )
+
+    _, flat_edges, pool_ids = multi_layer_graph.get_multi_layer_graphs()
+
+    hierarchy = {
+        "edge_indices": [
+            torch.as_tensor(edges, dtype=torch.long, device=device)
+            for edges in flat_edges
+        ],
+        "pool_indices": [
+            torch.as_tensor(ids, dtype=torch.long, device=device)
+            for ids in pool_ids
+        ],
+        "pos": torch.as_tensor(
+            evaluation.pos, dtype=torch.float32, device=device
+        ),
+    }
+
+    rmse, pressure_absolute_error, predictions = evaluate_test.evaluate(
+        evaluation,
+        velocity,
+        pressure,
+        velocity.normalizer,
+        velocity_bundle.dt_mean,
+        velocity_bundle.dt_std,
+        hierarchy,
+        device,
+    )
+
+    assert np.all(np.isfinite(predictions))
+
+    true_pressure_scale = np.abs(evaluation.Y_target[:, :, 2]).mean()
+    predicted_pressure_scale = np.abs(predictions[:, :, 2]).mean()
+
+    assert predicted_pressure_scale > 0.1 * true_pressure_scale, (
+        f"predicted pressure scale ({predicted_pressure_scale:.3e}) is "
+        f"far below the true field's scale "
+        f"({true_pressure_scale:.3e}) - looks like a raw increment was "
+        "returned instead of the reconstructed absolute state."
+    )

@@ -11,6 +11,7 @@ from gnn_comsol.data.normalization import (
     VELOCITY_COLUMNS,
     PhysicsNormalizer,
     StateNormalizer,
+    compute_multi_simulation_delta_normalization_parameters,
     compute_multi_simulation_physics_normalization_parameters,
     compute_normalization_parameters
 )
@@ -276,3 +277,92 @@ def test_physics_parameters_name_the_simulation_that_lacks_them():
         compute_multi_simulation_physics_normalization_parameters(
             [good, bad]
         )
+
+
+def delta_simulation(simulation_id, num_samples, num_nodes, seed=0):
+    """A RawDataset with a known one-step increment distribution."""
+
+    rng = np.random.default_rng(seed)
+
+    X_input = rng.normal(0.0, 1.0, size=(num_samples, num_nodes, 3))
+
+    delta = rng.normal(0.0, 1.0, size=(num_samples, num_nodes, 3))
+    delta[:, :, :2] *= 0.01  # velocity increments are small
+    delta[:, :, 2] *= 5.0    # pressure increments on a different scale
+
+    Y_target = X_input + delta
+
+    return RawDataset(
+        X_input=X_input,
+        Y_target=Y_target,
+        edge_index=np.zeros((2, 1), dtype=int),
+        edge_weight=np.ones(1),
+        delta_t=np.ones(num_samples),
+        h=np.array(0.0),
+        pos=np.zeros((num_nodes, 2)),
+        simulation_id=simulation_id
+    )
+
+
+def test_delta_parameters_pool_meshes_of_different_sizes():
+
+    simulations = [
+        delta_simulation(0, 12, 7, seed=1),
+        delta_simulation(1, 20, 13, seed=2),
+        delta_simulation(2, 5, 30, seed=3),
+    ]
+
+    mean, std = compute_multi_simulation_delta_normalization_parameters(
+        simulations
+    )
+
+    assert mean.shape == (3,)
+    assert std.shape == (3,)
+
+    # du and dv share one mean/std, taken from the magnitude of the
+    # velocity increment - same convention as the absolute-state one.
+    assert mean[0] == mean[1]
+    assert std[0] == std[1]
+
+
+def test_delta_normalizer_is_not_the_state_normalizer():
+    """
+    The whole point of a separate delta normalizer: an increment is
+    centred near zero and much smaller than the absolute field, so
+    reusing StateNormalizer's own parameters on it would neither centre
+    nor whiten it.
+    """
+
+    simulations = [delta_simulation(0, 200, 15, seed=7)]
+
+    delta_mean, delta_std = (
+        compute_multi_simulation_delta_normalization_parameters(
+            simulations
+        )
+    )
+
+    state_mean, state_std, _, _ = compute_normalization_parameters(
+        simulations[0].X_input, simulations[0].delta_t
+    )
+
+    assert not np.allclose(delta_mean, state_mean)
+    assert not np.allclose(delta_std, state_std)
+
+    delta_normalizer = StateNormalizer(delta_mean, delta_std)
+
+    delta = simulations[0].Y_target - simulations[0].X_input
+
+    normalized = delta_normalizer.transform(delta)
+
+    assert np.allclose(normalized.mean(axis=(0, 1)), 0.0, atol=1e-6)
+    assert np.allclose(normalized.std(axis=(0, 1)), 1.0, atol=1e-6)
+
+    assert np.allclose(
+        delta_normalizer.inverse_transform(normalized), delta
+    )
+
+
+def test_delta_parameters_require_at_least_one_simulation():
+
+    with pytest.raises(ValueError, match="At least one"):
+        compute_multi_simulation_delta_normalization_parameters([])

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import torch
 from .data.normalization import (
+    GeometryNormalizer,
     PhysicsNormalizer,
     StateNormalizer,
 )
@@ -40,6 +41,16 @@ class CheckpointBundle:
         Scaling of the physics-derived features. None for models that
         were not fed them.
 
+    geometry_normalizer : GeometryNormalizer or None
+        Scaling of the static per-node geometry features. None for
+        models that were not fed them.
+
+    delta_normalizer : StateNormalizer or None
+        Scaling of the one-step increment `Y_target - X_input`. Only
+        present for a model trained with `predict_delta: true`; it is a
+        StateNormalizer because the increment has the same 3-column
+        (u, v, p) shape as the state, just fitted on different data.
+
     dt_mean, dt_std : float or None
         Scaling of the time step. None for checkpoints written before
         these were stored; callers must refuse to guess them.
@@ -51,6 +62,8 @@ class CheckpointBundle:
     model: object
     normalizer: StateNormalizer
     physics_normalizer: PhysicsNormalizer | None
+    geometry_normalizer: GeometryNormalizer | None
+    delta_normalizer: StateNormalizer | None
     dt_mean: float | None
     dt_std: float | None
     metadata: dict
@@ -62,6 +75,8 @@ def save_checkpoint(
     normalizer,
     metadata=None,
     physics_normalizer=None,
+    geometry_normalizer=None,
+    delta_normalizer=None,
     dt_normalization=None,
 ):
     """
@@ -72,6 +87,14 @@ def save_checkpoint(
     ----------
     physics_normalizer : PhysicsNormalizer or None
         Required by models fed physics-derived input features.
+
+    geometry_normalizer : GeometryNormalizer or None
+        Required by models fed the static per-node geometry features.
+
+    delta_normalizer : StateNormalizer or None
+        Required by models trained with `predict_delta: true`, to bring
+        their normalized increment prediction back to a physical
+        increment before it is added to the input state.
 
     dt_normalization : (mean, std) or None
         Scaling of the time-step feature. It belongs here for exactly
@@ -97,6 +120,16 @@ def save_checkpoint(
     if physics_normalizer is not None:
         checkpoint["physics_normalizer"] = (
             physics_normalizer.to_dict()
+        )
+
+    if geometry_normalizer is not None:
+        checkpoint["geometry_normalizer"] = (
+            geometry_normalizer.to_dict()
+        )
+
+    if delta_normalizer is not None:
+        checkpoint["delta_normalizer"] = (
+            delta_normalizer.to_dict()
         )
 
     if dt_normalization is not None:
@@ -153,6 +186,22 @@ def read_checkpoint(path, model=None, device=None):
         else None
     )
 
+    geometry_state = checkpoint.get("geometry_normalizer")
+
+    geometry_normalizer = (
+        GeometryNormalizer.from_dict(geometry_state)
+        if geometry_state is not None
+        else None
+    )
+
+    delta_state = checkpoint.get("delta_normalizer")
+
+    delta_normalizer = (
+        StateNormalizer.from_dict(delta_state)
+        if delta_state is not None
+        else None
+    )
+
     dt_normalization = checkpoint.get("dt_normalization") or {}
 
     if model is not None:
@@ -162,6 +211,8 @@ def read_checkpoint(path, model=None, device=None):
         model=model,
         normalizer=normalizer,
         physics_normalizer=physics_normalizer,
+        geometry_normalizer=geometry_normalizer,
+        delta_normalizer=delta_normalizer,
         dt_mean=dt_normalization.get("mean"),
         dt_std=dt_normalization.get("std"),
         metadata=checkpoint.get("metadata", {}),
@@ -208,3 +259,63 @@ def load_physics_normalizer(
         )
 
     return physics_normalizer
+
+
+def load_geometry_normalizer(
+    path,
+    device=None,
+    required=False,
+):
+    """
+    The GeometryNormalizer stored in a checkpoint, or None.
+
+    Parameters
+    ----------
+    required : bool
+        If True, raise when the checkpoint does not carry one.
+        If False, return None for models that do not use
+        geometry-derived features.
+    """
+
+    geometry_normalizer = read_checkpoint(
+        path,
+        device=device,
+    ).geometry_normalizer
+
+    if geometry_normalizer is None and required:
+        raise ValueError(
+            f"{path} has no geometry normalizer stored in it, but this "
+            "model requires geometry-derived input features."
+        )
+
+    return geometry_normalizer
+
+
+def load_delta_normalizer(
+    path,
+    device=None,
+    required=False,
+):
+    """
+    The delta StateNormalizer stored in a checkpoint, or None.
+
+    Parameters
+    ----------
+    required : bool
+        If True, raise when the checkpoint does not carry one.
+        If False, return None for models trained to predict the
+        absolute state rather than the one-step increment.
+    """
+
+    delta_normalizer = read_checkpoint(
+        path,
+        device=device,
+    ).delta_normalizer
+
+    if delta_normalizer is None and required:
+        raise ValueError(
+            f"{path} has no delta normalizer stored in it, but this "
+            "model was trained with predict_delta: true."
+        )
+
+    return delta_normalizer

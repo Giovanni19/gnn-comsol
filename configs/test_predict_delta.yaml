@@ -1,0 +1,56 @@
+name: test_predict_delta
+
+seed: 68
+
+dataset:
+  path: C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_gnn_dataset.mat
+  skip_initial: 1
+
+split:
+  mode: temporal
+  train_fraction: 0.70
+  val_fraction: 0.15
+  gap: 1
+
+training:
+  # Smoke test: increase once the delta target is confirmed to train.
+  num_epochs: 50
+  batch_size: 8
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+
+    # Predict (u,v)^(k+1) - (u,v)^k instead of the absolute (u,v)^(k+1).
+    # Reconstructed back to the absolute field automatically at
+    # evaluation time - see the "Absolute state vs. increment" section
+    # of the README.
+    predict_delta: true
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure
+    features: time
+    architecture: bsms
+
+    # Same idea for pressure: predict p^(k+1) - p^k.
+    predict_delta: true
+
+    num_neurons: 64
+    unet_depth: 5
+    hidden_layers: 2
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3
+
+    num_layers: 1
+    dropout: 0.0

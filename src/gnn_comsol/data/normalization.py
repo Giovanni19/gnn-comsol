@@ -39,6 +39,18 @@ PHYSICS_FEATURE_NAMES = [
 ]
 
 NUM_PHYSICS_FEATURES = len(PHYSICS_FEATURE_NAMES)
+
+GEOMETRY_FEATURE_NAMES = [
+    "wall_geom_x",
+    "wall_geom_y",
+    "inlet_geom_x",
+    "inlet_geom_y",
+    "outlet_geom_x",
+    "outlet_geom_y",
+]
+
+NUM_GEOMETRY_FEATURES = len(GEOMETRY_FEATURE_NAMES)
+
 # Which columns of the target a network is responsible for
 TARGET_COLUMNS = {
     "velocity": VELOCITY_COLUMNS,
@@ -191,6 +203,206 @@ def compute_multi_simulation_physics_normalization_parameters(
     # single-simulation version: mean and std are taken over axes (0, 1),
     # which is exactly the flattened sample-node axis.
     return compute_physics_normalization_parameters(flat[None, ...])
+
+def compute_geometry_normalization_parameters(
+    geometry_features_train,
+):
+    """
+    Compute mean and standard deviation of the static geometric
+    node features using TRAINING DATA ONLY.
+
+    Unlike the physics features, geometry features do not vary over
+    time: one value per node, not per (sample, node) pair. Statistics
+    are therefore taken over the node axis only.
+
+    Parameters
+    ----------
+    geometry_features_train : ndarray
+        Shape (N, F), where currently:
+
+        F = 6
+
+        0 -> wall_geom_x
+        1 -> wall_geom_y
+        2 -> inlet_geom_x
+        3 -> inlet_geom_y
+        4 -> outlet_geom_x
+        5 -> outlet_geom_y
+
+    Returns
+    -------
+    mean : ndarray, shape (F,)
+    std : ndarray, shape (F,)
+    """
+
+    geometry_features_train = np.asarray(
+        geometry_features_train,
+        dtype=np.float64,
+    )
+
+    if geometry_features_train.ndim != 2:
+        raise ValueError(
+            "geometry_features_train must have shape (nodes, features), "
+            f"got {geometry_features_train.shape}."
+        )
+
+    if geometry_features_train.shape[-1] != NUM_GEOMETRY_FEATURES:
+        raise ValueError(
+            f"Expected {NUM_GEOMETRY_FEATURES} geometry features, "
+            f"got {geometry_features_train.shape[-1]}."
+        )
+
+    if not np.all(np.isfinite(geometry_features_train)):
+        raise ValueError(
+            "geometry_features_train contains NaN or Inf."
+        )
+
+    mean = geometry_features_train.mean(axis=0)
+    std = geometry_features_train.std(axis=0) + 1e-8
+
+    return mean, std
+
+
+def compute_multi_simulation_geometry_normalization_parameters(
+    train_simulations,
+):
+    """
+    Geometry-feature mean and std over all TRAINING simulations.
+
+    The counterpart of
+    compute_multi_simulation_physics_normalization_parameters for the
+    static per-node geometric features. Simulations may have different
+    meshes: their nodes are stacked together, so every node of every
+    training geometry contributes equally regardless of mesh size.
+
+    Validation and test simulations must NOT be passed to this function.
+
+    Returns
+    -------
+    mean : ndarray, shape (NUM_GEOMETRY_FEATURES,)
+    std : ndarray, shape (NUM_GEOMETRY_FEATURES,)
+    """
+
+    if len(train_simulations) == 0:
+        raise ValueError(
+            "At least one training simulation is required."
+        )
+
+    stacked = []
+
+    for simulation in train_simulations:
+
+        features = simulation.geometry_features
+
+        if features is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                f"({simulation.file_path}) has no geometry_features, "
+                "but the experiment asked for them. Either regenerate "
+                "the .mat with geometry features, or drop "
+                "use_geometry_features from the configuration."
+            )
+
+        stacked.append(
+            np.asarray(features, dtype=np.float64)
+        )
+
+    flat = np.concatenate(stacked, axis=0)
+
+    return compute_geometry_normalization_parameters(flat)
+
+
+def compute_multi_simulation_delta_normalization_parameters(
+    train_simulations,
+):
+    """
+    Mean and standard deviation of the one-step state INCREMENT
+    `Y_target - X_input`, computed on TRAINING simulations only.
+
+    Used to scale the target of a network configured with
+    `predict_delta: true`. The increment has a very different scale
+    from the absolute state - consecutive snapshots are nearly
+    identical, so the increment is small and centred near zero - so it
+    needs its own normalizer: reusing StateNormalizer's mean would
+    subtract the absolute field's mean from a quantity that is not the
+    absolute field.
+
+    Same convention as compute_multi_simulation_normalization_parameters:
+    du and dv share one mean/std, taken from the magnitude of the
+    velocity increment sqrt(du**2 + dv**2); dp gets its own.
+
+    Returns
+    -------
+    mean : ndarray, shape (3,)
+    std : ndarray, shape (3,)
+    """
+
+    if len(train_simulations) == 0:
+        raise ValueError(
+            "At least one training simulation is required."
+        )
+
+    velocity_sum = 0.0
+    velocity_sum_sq = 0.0
+    velocity_count = 0
+
+    pressure_sum = 0.0
+    pressure_sum_sq = 0.0
+    pressure_count = 0
+
+    for simulation in train_simulations:
+
+        delta = simulation.Y_target - simulation.X_input
+
+        du = delta[:, :, 0]
+        dv = delta[:, :, 1]
+
+        delta_velocity_magnitude = np.sqrt(du ** 2 + dv ** 2)
+
+        velocity_sum += np.sum(
+            delta_velocity_magnitude, dtype=np.float64
+        )
+
+        velocity_sum_sq += np.sum(
+            delta_velocity_magnitude ** 2, dtype=np.float64
+        )
+
+        velocity_count += delta_velocity_magnitude.size
+
+        dp = delta[:, :, 2]
+
+        pressure_sum += np.sum(dp, dtype=np.float64)
+        pressure_sum_sq += np.sum(dp ** 2, dtype=np.float64)
+        pressure_count += dp.size
+
+    velocity_mean = velocity_sum / velocity_count
+    pressure_mean = pressure_sum / pressure_count
+
+    velocity_variance = max(
+        velocity_sum_sq / velocity_count - velocity_mean ** 2,
+        0.0,
+    )
+
+    pressure_variance = max(
+        pressure_sum_sq / pressure_count - pressure_mean ** 2,
+        0.0,
+    )
+
+    velocity_std = np.sqrt(velocity_variance) + 1e-8
+    pressure_std = np.sqrt(pressure_variance) + 1e-8
+
+    delta_mean = np.array(
+        [velocity_mean, velocity_mean, pressure_mean],
+        dtype=np.float64,
+    )
+
+    delta_std = np.array(
+        [velocity_std, velocity_std, pressure_std],
+        dtype=np.float64,
+    )
+
+    return delta_mean, delta_std
+
 
 def compute_multi_simulation_normalization_parameters(train_simulations):
     """
@@ -620,12 +832,128 @@ class PhysicsNormalizer:
             f"std={np.array2string(self.std, precision=4)})"
         )
 
+class GeometryNormalizer:
+    """
+    Standardization of the static per-node geometry features.
+
+    Each geometry feature is normalized independently:
+
+        x_norm = (x - mean) / std
+
+    Parameters must always be computed on TRAINING DATA ONLY.
+    """
+
+    KIND = "geometry_standardize"
+
+    def __init__(self, mean, std):
+
+        self.mean = np.asarray(
+            mean,
+            dtype=np.float64,
+        )
+
+        self.std = np.asarray(
+            std,
+            dtype=np.float64,
+        )
+
+        if self.mean.shape != self.std.shape:
+            raise ValueError(
+                f"mean {self.mean.shape} and "
+                f"std {self.std.shape} "
+                "must have the same shape."
+            )
+
+        if self.mean.shape != (NUM_GEOMETRY_FEATURES,):
+            raise ValueError(
+                f"Expected {NUM_GEOMETRY_FEATURES} "
+                "geometry normalization parameters, "
+                f"got {self.mean.shape}."
+            )
+
+        if np.any(self.std <= 0):
+            raise ValueError(
+                "std must be strictly positive, "
+                f"got {self.std}."
+            )
+
+    def transform(self, values):
+        """
+        Physical geometry features -> normalized features.
+        """
+
+        return (
+            values
+            - self._as_like(self.mean, values)
+        ) / self._as_like(self.std, values)
+
+    def inverse_transform(self, values):
+        """
+        Normalized geometry features -> physical units.
+        """
+
+        return (
+            values
+            * self._as_like(self.std, values)
+            + self._as_like(self.mean, values)
+        )
+
+    @staticmethod
+    def _as_like(parameters, values):
+
+        if isinstance(values, torch.Tensor):
+
+            return torch.as_tensor(
+                parameters,
+                dtype=values.dtype,
+                device=values.device,
+            )
+
+        return parameters
+
+    def to_dict(self):
+
+        return {
+            "kind": self.KIND,
+            "mean": self.mean.tolist(),
+            "std": self.std.tolist(),
+            "feature_names": GEOMETRY_FEATURE_NAMES,
+        }
+
+    @classmethod
+    def from_dict(cls, state):
+
+        kind = state.get("kind")
+
+        if kind != cls.KIND:
+            raise ValueError(
+                f"Unknown geometry normalization "
+                f"kind {kind!r}."
+            )
+
+        return cls(
+            state["mean"],
+            state["std"],
+        )
+
+    def __repr__(self):
+
+        return (
+            f"GeometryNormalizer("
+            f"kind='{self.KIND}', "
+            f"mean={np.array2string(self.mean, precision=4)}, "
+            f"std={np.array2string(self.std, precision=4)})"
+        )
+
+
 def normalize_simulation(
     simulation,
     normalizer,
     dt_mean,
     dt_std,
     physics_normalizer=None,
+    geometry_normalizer=None,
+    delta_normalizer=None,
 ):
     """
     Normalize one complete simulation while preserving its mesh.
@@ -644,6 +972,20 @@ def normalize_simulation(
         features. State and physics features have their own normalizers
         because they live in different units and have wildly different
         scales; both must be fitted on training data only.
+
+    geometry_features:
+        Present only when a geometry_normalizer is given. Static
+        per-node features (one row per mesh node, not per timestep),
+        normalized with their own mean/std for the same reason as the
+        physics features.
+
+    delta:
+        Present only when a delta_normalizer is given: the one-step
+        increment `Y_target - X_input`, normalized with its own
+        mean/std (an increment is not the same quantity as an absolute
+        state, so it must not be scaled with `normalizer`). Used as the
+        training target of a network configured with
+        `predict_delta: true`.
     """
 
     normalized = {
@@ -686,6 +1028,29 @@ def normalize_simulation(
             physics_normalizer.transform(
                 simulation.physics_features
             )
+        )
+
+    if geometry_normalizer is not None:
+
+        if simulation.geometry_features is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                f"({simulation.file_path}) has no geometry_features, "
+                "but the experiment asked for them. Either regenerate "
+                "the .mat with geometry features, or drop "
+                "use_geometry_features from the configuration."
+            )
+
+        normalized["geometry_features"] = (
+            geometry_normalizer.transform(
+                simulation.geometry_features
+            )
+        )
+
+    if delta_normalizer is not None:
+
+        normalized["delta"] = delta_normalizer.transform(
+            simulation.Y_target - simulation.X_input
         )
 
     return normalized

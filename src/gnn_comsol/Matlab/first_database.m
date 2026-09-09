@@ -177,7 +177,12 @@ p_nodes = mphinterp(model, p_var, ...
     'solnum', 'all');
 
 %% ============================================================
-%  TEST GEOMETRIC FEATURES
+%  3.2 EVALUATE GEOMETRIC BOUNDARY FEATURES
+% ============================================================
+%
+% For each mesh node, evaluate the reciprocal distance to the
+% wall/inlet/outlet boundaries (G2/G3/G4) and the direction
+% toward each of them. Combined below into geometry_features.
 % ============================================================
 
 geometry_dataset_tag = 'dset2';
@@ -220,23 +225,6 @@ outlet_dir_x = mphinterp(model, 'wd3.Ddirx', ...
 outlet_dir_y = mphinterp(model, 'wd3.Ddiry', ...
     'coord', P, ...
     'dataset', geometry_dataset_tag);
-
-
-fprintf('\n========================================\n');
-fprintf('GEOMETRIC FEATURES TEST\n');
-fprintf('========================================\n');
-
-fprintf('G_wall       : %d x %d\n', size(G_wall));
-fprintf('wall_dir_x   : %d x %d\n', size(wall_dir_x));
-fprintf('wall_dir_y   : %d x %d\n', size(wall_dir_y));
-
-fprintf('G_inlet      : %d x %d\n', size(G_inlet));
-fprintf('inlet_dir_x  : %d x %d\n', size(inlet_dir_x));
-fprintf('inlet_dir_y  : %d x %d\n', size(inlet_dir_y));
-
-fprintf('G_outlet     : %d x %d\n', size(G_outlet));
-fprintf('outlet_dir_x : %d x %d\n', size(outlet_dir_x));
-fprintf('outlet_dir_y : %d x %d\n', size(outlet_dir_y));
 
 %% ============================================================
 %  BUILD GEOMETRIC FEATURES
@@ -467,12 +455,6 @@ fprintf('X dimensions: %d x %d x %d\n\n', ...
 % ============================================================
 
 physics_features = zeros(Nt, N, 5);
-
-physics_features(:,:,1) = du_dx_nodes;
-physics_features(:,:,2) = du_dy_nodes;
-physics_features(:,:,3) = dv_dx_nodes;
-physics_features(:,:,4) = dv_dy_nodes;
-physics_features(:,:,5) = div_conv_nodes;
 
 physics_features(:,:,1) = du_dx_nodes;
 physics_features(:,:,2) = du_dy_nodes;
@@ -773,12 +755,20 @@ end
 %
 % h
 %   Global mesh size
+%
+% geometry_features
+%   N x 6
+%   Static per-node boundary distance/direction features
+%   (wall, inlet, outlet). Same for every timestep - NOT
+%   indexed by time, unlike physics_features.
 % ============================================================
 
 save(output_file, ...
     'X', ...
     'physics_features', ...
     'physics_feature_names', ...
+    'geometry_features', ...
+    'geometry_feature_names', ...
     'edge_index', ...
     'edge_weight', ...
     'P', ...
@@ -834,55 +824,6 @@ for k = 1:size(geometry_features,2)
         sum(isnan(values(:))), ...
         sum(isinf(values(:))) ...
     );
-
-end
-
-%%
-tags = cell(model.sol('sol1').feature().tags());
-
-fprintf('\n========================================\n');
-fprintf('SOLVER SEQUENCE\n');
-fprintf('========================================\n');
-
-for k = 1:length(tags)
-
-    tag = tags{k};
-
-    fprintf('\nFeature: %s\n', tag);
-
-    try
-        type = char(model.sol('sol1').feature(tag).getType());
-        fprintf('Type   : %s\n', type);
-    catch ME
-        fprintf('Could not retrieve type: %s\n', ME.message);
-    end
-
-end
-%%
-tags_t1 = cell(model.sol('sol1').feature('t1').feature().tags());
-
-fprintf('\n========================================\n');
-fprintf('TIME SOLVER SUBFEATURES\n');
-fprintf('========================================\n');
-
-for k = 1:length(tags_t1)
-
-    tag = tags_t1{k};
-
-    fprintf('\nFeature: %s\n', tag);
-
-    try
-        type = char( ...
-            model.sol('sol1').feature('t1').feature(tag).getType() ...
-        );
-
-        fprintf('Type   : %s\n', type);
-
-    catch ME
-
-        fprintf('Could not retrieve type: %s\n', ME.message);
-
-    end
 
 end
 

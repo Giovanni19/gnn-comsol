@@ -12,7 +12,7 @@ in the experiment configuration.
 
 import numpy as np
 
-from .normalization import NUM_PHYSICS_FEATURES
+from .normalization import NUM_GEOMETRY_FEATURES, NUM_PHYSICS_FEATURES
 
 
 # Number of node features produced by each encoding, given the 3 state
@@ -127,8 +127,8 @@ def build_features(kind, X_norm, dt_norm, num_frequencies=4):
 # The BSMS pressure network is fed more than the state encoding, and the
 # layout of what it is fed is decided HERE and nowhere else:
 #
-#     [ time encoding | physics features | predicted velocity ]
-#       4 or 12         5, if used         2, if used
+#     [ time encoding | physics features | geometry features | predicted velocity ]
+#       4 or 12         5, if used         6, if used           2, if used
 #
 # This used to be assembled inline by the training script and rebuilt by
 # hand in the evaluation script. The two could disagree on the ORDER of
@@ -140,6 +140,7 @@ def build_features(kind, X_norm, dt_norm, num_frequencies=4):
 def pressure_features_size(
     encoding,
     use_physics_features=False,
+    use_geometry_features=False,
     use_predicted_velocity=False
 ):
     """
@@ -161,6 +162,9 @@ def pressure_features_size(
     if use_physics_features:
         size += NUM_PHYSICS_FEATURES
 
+    if use_geometry_features:
+        size += NUM_GEOMETRY_FEATURES
+
     if use_predicted_velocity:
         size += 2
 
@@ -172,6 +176,7 @@ def build_pressure_features(
     X_norm,
     dt_norm,
     physics_features=None,
+    geometry_features=None,
     predicted_velocity=None,
     num_frequencies=4
 ):
@@ -190,6 +195,12 @@ def build_pressure_features(
         Already normalized with the PhysicsNormalizer of the run. None
         when the network does not use them.
 
+    geometry_features : (N, NUM_GEOMETRY_FEATURES) or None
+        Already normalized with the GeometryNormalizer of the run. One
+        row per mesh node - NOT indexed by time, unlike
+        physics_features - so it is broadcast over the S samples before
+        being concatenated. None when the network does not use them.
+
     predicted_velocity : (S, N, 2) or None
         u(t+1), v(t+1) from the velocity network, in normalized units.
         None when the network does not use them.
@@ -206,9 +217,43 @@ def build_pressure_features(
         num_frequencies=num_frequencies
     )
 
+    num_samples, num_nodes = features.shape[:2]
+
+    if geometry_features is not None:
+
+        geometry_features = np.asarray(geometry_features)
+
+        if geometry_features.ndim != 2:
+            raise ValueError(
+                "geometry features must have shape (nodes, "
+                f"{NUM_GEOMETRY_FEATURES}), got shape "
+                f"{geometry_features.shape}."
+            )
+
+        if geometry_features.shape[0] != num_nodes:
+            raise ValueError(
+                f"geometry features have {geometry_features.shape[0]} "
+                f"nodes, which does not line up with the state "
+                f"encoding of shape {features.shape}."
+            )
+
+        if geometry_features.shape[-1] != NUM_GEOMETRY_FEATURES:
+            raise ValueError(
+                f"Expected {NUM_GEOMETRY_FEATURES} geometry features, "
+                f"got {geometry_features.shape[-1]}."
+            )
+
+        # Static per-node feature, repeated identically for every
+        # sample so it can be concatenated like the other blocks.
+        geometry_features = np.broadcast_to(
+            geometry_features[None, :, :],
+            (num_samples, num_nodes, NUM_GEOMETRY_FEATURES)
+        )
+
     # Order matters: it is part of what the trained weights expect.
     blocks = [
         ("physics features", physics_features, NUM_PHYSICS_FEATURES),
+        ("geometry features", geometry_features, NUM_GEOMETRY_FEATURES),
         ("predicted velocity", predicted_velocity, 2)
     ]
 
@@ -236,6 +281,7 @@ def build_pressure_features(
     expected = pressure_features_size(
         encoding,
         use_physics_features=physics_features is not None,
+        use_geometry_features=geometry_features is not None,
         use_predicted_velocity=predicted_velocity is not None
     )
 
