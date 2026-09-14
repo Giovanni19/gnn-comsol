@@ -1,0 +1,53 @@
+name: reynolds
+
+seed: 68
+
+dataset:
+  paths:
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_40R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_60R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_80R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_100R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_120R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_140R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_160R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_180R.mat
+    - C:/Users/giovanni/.comsol/v64/llmatlab/channel2d_manual_stabilization_200R.mat
+  skip_initial: 0
+
+split:
+  mode: simulation
+  train_fraction: 0.80
+
+training:
+  num_epochs: 100
+  batch_size: 1
+
+networks:
+
+  velocity:
+    predicts: velocity
+    features: time
+    architecture: gcn
+
+    num_neurons: 64
+    num_layers: 3
+    dropout: 0.0
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-5
+
+  pressure:
+    predicts: pressure
+    features: time
+    architecture: bsms
+
+    num_neurons: 64
+    unet_depth: 5
+    hidden_layers: 2
+
+    learning_rate: 1.0e-3
+    weight_decay: 1.0e-3
+
+    num_layers: 1
+    dropout: 0.0

@@ -1,3 +1,4 @@
+
 %% ============================================================
 %  COMSOL -> GNN DATASET
 %
@@ -32,7 +33,6 @@
 
 %% 0. Initialization
 
-clear all
 clc
 close all
 
@@ -47,10 +47,19 @@ import com.comsol.model.util.*
 
 % COMSOL model
 model_file = ...
-    '\\nl-filer1\users$\giovanni\Desktop\Comsol simulations\channel2d_gnn_initial_guess_test.mph';
+    '\\nl-filer1\users$\giovanni\Desktop\Comsol simulations\Reynolds dataset\channel2d_manual_stabilization_200R.mph';
+
+
+% Run COMSOL simulation?
+% true  -> run Study 1
+% false -> use the solution already stored in the .mph file
+run_simulation = false;
+
+% COMSOL time-dependent solution
+solution_tag = 'sol4';
 
 % COMSOL solution dataset
-dataset_tag = 'dset1';
+dataset_tag = 'dset4';
 
 % COMSOL dependent variables
 u_var = 'u';
@@ -65,7 +74,8 @@ dv_dy_var   = 'dv_dy';
 div_conv_var = 'div_conv';
 
 % Output dataset
-output_file = 'C:\Users\giovanni\.comsol\v64\llmatlab\channel2d_physics_variables_gnn_dataset.mat';
+output_file = ...
+    'C:\Users\giovanni\.comsol\v64\llmatlab\channel2d_manual_stabilization_200R.mat';
 
 
 %% 0.3 Load COMSOL model
@@ -77,47 +87,61 @@ fprintf('COMSOL model loaded successfully.\n');
 fprintf('Model file:\n%s\n', model_file);
 fprintf('========================================\n\n');
 
+
 %% ============================================================
 % 0.4 RUN STUDY 1 - TIME DEPENDENT
 % ============================================================
 
-fprintf('\n========================================\n');
-fprintf('RUNNING STUDY 1 - TIME DEPENDENT\n');
-fprintf('========================================\n');
-
-tic;
-
-try
-
-    model.study('std1').run;
-
-    elapsed_time = toc;
+if run_simulation
 
     fprintf('\n========================================\n');
-    fprintf('STUDY 1 CONVERGED\n');
+    fprintf('RUNNING STUDY 1 - TIME DEPENDENT\n');
     fprintf('========================================\n');
 
-    fprintf('Elapsed time = %.6f s\n', elapsed_time);
+    tic;
 
-catch ME
+    try
 
-    elapsed_time = toc;
+        model.study('std1').run;
+
+        elapsed_time = toc;
+
+        fprintf('\n========================================\n');
+        fprintf('STUDY 1 CONVERGED\n');
+        fprintf('========================================\n');
+
+        fprintf('Elapsed time = %.6f s\n', elapsed_time);
+
+    catch ME
+
+        elapsed_time = toc;
+
+        fprintf('\n========================================\n');
+        fprintf('STUDY 1 FAILED\n');
+        fprintf('========================================\n');
+
+        fprintf('Elapsed time = %.6f s\n\n', elapsed_time);
+        fprintf('%s\n', ME.message);
+
+        rethrow(ME);
+
+    end
+
+else
 
     fprintf('\n========================================\n');
-    fprintf('STUDY 1 FAILED\n');
+    fprintf('SKIPPING STUDY 1\n');
+    fprintf('Using solution already stored in COMSOL model.\n');
     fprintf('========================================\n');
-
-    fprintf('Elapsed time = %.6f s\n\n', elapsed_time);
-    fprintf('%s\n', ME.message);
-
-    rethrow(ME);
 
 end
+
+
 %% ============================================================
 %  1. MESH
 % ============================================================
 
-[stats, meshdata] = mphmeshstats(model,"mesh1");
+[stats, meshdata] = mphmeshstats(model, "mesh1");
 
 % Coordinates of geometric mesh vertices:
 %
@@ -140,7 +164,7 @@ fprintf('Number of mesh nodes: %d\n', N);
 %  2. TIME INFORMATION
 % ============================================================
 
-info = mphsolinfo(model);
+info = mphsolinfo(model, 'soltag', solution_tag);
 
 % Time vector
 t = info.solvals;
@@ -149,7 +173,6 @@ t = info.solvals;
 Nt = length(t);
 
 fprintf('Number of timesteps: %d\n', Nt);
-
 fprintf('Initial time: %.6g\n', t(1));
 fprintf('Final time:   %.6g\n\n', t(end));
 
@@ -175,6 +198,7 @@ p_nodes = mphinterp(model, p_var, ...
     'coord', P, ...
     'dataset', dataset_tag, ...
     'solnum', 'all');
+
 
 %% ============================================================
 %  3.2 EVALUATE GEOMETRIC BOUNDARY FEATURES
@@ -226,6 +250,7 @@ outlet_dir_y = mphinterp(model, 'wd3.Ddiry', ...
     'coord', P, ...
     'dataset', geometry_dataset_tag);
 
+
 %% ============================================================
 %  BUILD GEOMETRIC FEATURES
 % ============================================================
@@ -253,7 +278,6 @@ inlet_geom_y = G_inlet .* inlet_dir_y;
 outlet_geom_x = G_outlet .* outlet_dir_x;
 outlet_geom_y = G_outlet .* outlet_dir_y;
 
-
 % Force column vectors
 wall_geom_x = wall_geom_x(:);
 wall_geom_y = wall_geom_y(:);
@@ -263,7 +287,6 @@ inlet_geom_y = inlet_geom_y(:);
 
 outlet_geom_x = outlet_geom_x(:);
 outlet_geom_y = outlet_geom_y(:);
-
 
 % Build geometric-feature matrix
 geometry_features = [
@@ -275,7 +298,6 @@ geometry_features = [
     outlet_geom_y
 ];
 
-
 geometry_feature_names = {
     'wall_geom_x', ...
     'wall_geom_y', ...
@@ -285,7 +307,6 @@ geometry_feature_names = {
     'outlet_geom_y'
 };
 
-
 fprintf('\n========================================\n');
 fprintf('GEOMETRIC FEATURES\n');
 fprintf('========================================\n');
@@ -293,6 +314,7 @@ fprintf('========================================\n');
 fprintf('geometry_features: %d x %d\n', ...
     size(geometry_features,1), ...
     size(geometry_features,2));
+
 
 %% ============================================================
 %  3.1 EVALUATE PHYSICS FEATURES AT MESH NODES
@@ -322,9 +344,6 @@ dv_dy_nodes = mphinterp(model, dv_dy_var, ...
     'dataset', dataset_tag, ...
     'solnum', 'all');
 
-
-
-
 % Divergence of the convective acceleration
 %
 % div_conv =
@@ -353,7 +372,6 @@ fprintf('v_nodes : %d x %d\n', ...
 
 fprintf('p_nodes : %d x %d\n\n', ...
     size(p_nodes,1), size(p_nodes,2));
-
 
 % Check consistency
 if size(u_nodes,1) ~= Nt || size(u_nodes,2) ~= N
@@ -411,6 +429,8 @@ for k = 1:length(physics_arrays)
     end
 
 end
+
+
 %% ============================================================
 %  5. BUILD NODE-FEATURE DATASET X
 % ============================================================
@@ -437,6 +457,7 @@ X(:,:,3) = p_nodes;
 fprintf('Node-feature tensor X created.\n');
 fprintf('X dimensions: %d x %d x %d\n\n', ...
     size(X,1), size(X,2), size(X,3));
+
 
 %% ============================================================
 %  5.1 BUILD PHYSICS-FEATURE DATASET
@@ -470,6 +491,7 @@ physics_feature_names = {
     'dv_dy', ...
     'div_conv'
 };
+
 fprintf('Physics-feature tensor created.\n');
 
 fprintf( ...
@@ -478,6 +500,8 @@ fprintf( ...
     size(physics_features,2), ...
     size(physics_features,3) ...
 );
+
+
 %% ============================================================
 %  6. EXTRACT TRIANGULAR ELEMENT CONNECTIVITY
 % ============================================================
@@ -490,6 +514,10 @@ fprintf( ...
 % ============================================================
 
 tri_idx = find(strcmp(meshdata.types, 'tri'));
+
+if isempty(tri_idx)
+    error('No triangular elements found in mesh.');
+end
 
 % Connectivity matrix of triangular elements
 T = meshdata.elem{tri_idx(1)};
@@ -597,7 +625,6 @@ for e = 1:Ne
 
 end
 
-
 % The graph is undirected.
 %
 % Therefore:
@@ -614,14 +641,10 @@ end
 
 edges = sort(edges,2);
 
-
 % Remove duplicate mesh edges shared by adjacent triangles
-
 edges = unique(edges,'rows');
 
-
 % Number of unique undirected graph edges
-
 Nedges = size(edges,1);
 
 fprintf('Number of unique graph edges: %d\n', Nedges);
@@ -682,6 +705,8 @@ edge_index = [source - 1, target - 1];
 
 % Same weight for both directions
 edge_weight = [weights; weights];
+
+
 %% ============================================================
 %  12. FINAL DATASET CHECKS
 % ============================================================
@@ -711,7 +736,6 @@ fprintf('Mesh nodes  : %d\n', N);
 fprintf('Triangles   : %d\n', Ne);
 fprintf('Unique edges: %d\n', Nedges);
 
-
 % Consistency checks
 
 if size(edge_index,1) ~= 2*Nedges
@@ -729,38 +753,6 @@ end
 
 %% ============================================================
 %  13. SAVE DATASET FOR PYTHON / PYTORCH GEOMETRIC
-% ============================================================
-%
-% Saved variables:
-%
-% X
-%   Nt x N x 3
-%   Node features [u,v,p] for every timestep
-%
-% edge_index
-%   2*Nedges x 2 in the MATLAB file
-%   Each row = [source,target]
-%   Already converted to zero-based Python indexing
-%
-% edge_weight
-%   2*Nedges x 1
-%   Geometric weight associated with each directed edge
-%
-% P
-%   2 x N
-%   Mesh-node coordinates
-%
-% t
-%   Time vector
-%
-% h
-%   Global mesh size
-%
-% geometry_features
-%   N x 6
-%   Static per-node boundary distance/direction features
-%   (wall, inlet, outlet). Same for every timestep - NOT
-%   indexed by time, unlike physics_features.
 % ============================================================
 
 save(output_file, ...
@@ -781,6 +773,10 @@ fprintf('\nDataset saved successfully:\n%s\n', output_file);
 fprintf('\nCOMSOL -> MATLAB -> PyTorch preprocessing completed.\n');
 
 
+%% ============================================================
+%  EXTRA INFORMATION
+% ============================================================
+
 fprintf('\nMesh element types:\n');
 
 for k = 1:length(meshdata.types)
@@ -790,6 +786,7 @@ for k = 1:length(meshdata.types)
         size(meshdata.elem{k},2));
 
 end
+
 
 fprintf('\nPhysics feature ranges:\n');
 
@@ -809,7 +806,6 @@ for k = 1:size(physics_features,3)
 end
 
 
-
 fprintf('\nGeometric feature ranges:\n');
 
 for k = 1:size(geometry_features,2)
@@ -827,6 +823,7 @@ for k = 1:size(geometry_features,2)
 
 end
 
+
 %% ============================================================
 % 14. SAVE COMSOL MODEL WITH TIME-DEPENDENT SOLUTION
 % ============================================================
@@ -838,5 +835,6 @@ fprintf('========================================\n');
 mphsave(model, model_file);
 
 fprintf('COMSOL model saved successfully.\n');
-fprintf('Time-dependent solution sol1 is now stored in:\n%s\n', ...
-    model_file);
+fprintf('Time-dependent solution %s is now stored in:\n%s\n', ...
+    solution_tag, model_file);
+

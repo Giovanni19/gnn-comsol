@@ -16,8 +16,8 @@ import com.comsol.model.util.*
 % ============================================================
 
 % Test a small range first
-k_start = 990;
-k_end   = 1010;
+k_start = 1;
+k_end   = 100;
 
 if k_start < 1 || k_end > num_predictions || k_start > k_end
     error('Invalid transition range.');
@@ -53,5 +53,6 @@ results = run_gnn_vs_standard_transitions( ...
 results_file = 'stationary_gnn_comparison.mat';
 
 save(results_file, 'results');
+
 
 fprintf('\nResults saved to:\n%s\n', results_file);
