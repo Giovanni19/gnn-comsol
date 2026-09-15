@@ -535,33 +535,24 @@ def build_bsms_hierarchies(simulations, config):
 
 def build_physics_geometries(simulations):
     """
-    Static WLSQ geometry for each simulation.
+    Static WLSQ geometry for simulations that provide it.
 
-    These quantities depend only on the mesh and are shared
-    by every timestep of the same simulation.
+    Simulations without WLSQ data are skipped. This allows
+    ordinary supervised training to use older datasets.
     """
 
     physics_geometries = {}
 
     for simulation in simulations:
 
-        if simulation.neighbors is None:
-            raise ValueError(
-                f"Simulation {simulation.simulation_id} "
-                "has no WLSQ neighbors."
-            )
+        has_wlsq = (
+            simulation.neighbors is not None
+            and simulation.G_wlsq is not None
+            and simulation.cell_index is not None
+        )
 
-        if simulation.G_wlsq is None:
-            raise ValueError(
-                f"Simulation {simulation.simulation_id} "
-                "has no G_wlsq operators."
-            )
-
-        if simulation.cell_index is None:
-            raise ValueError(
-                f"Simulation {simulation.simulation_id} "
-                "has no cell_index."
-            )
+        if not has_wlsq:
+            continue
 
         physics_geometries[simulation.simulation_id] = {
             "neighbors": simulation.neighbors,

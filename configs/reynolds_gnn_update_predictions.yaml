@@ -20,8 +20,8 @@ split:
   train_fraction: 0.80
 
 training:
-  num_epochs: 10
-  batch_size: 1
+  num_epochs: 100
+  batch_size: 2
 
 networks:
 
