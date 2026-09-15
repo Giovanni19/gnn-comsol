@@ -671,7 +671,393 @@ dy = dy(:);
 % Euclidean edge distance
 dij = sqrt(dx.^2 + dy.^2);
 
+%% ============================================================
+%  9.1 PRECOMPUTE WLSQ GEOMETRIC OPERATORS
+% ============================================================
+%
+% For each graph node i:
+%
+%   1. Find its first-order graph neighbors
+%   2. Build the weighted least-squares matrix A_i
+%   3. Compute the economy QR factorization
+%
+% Weight:
+%
+%       w_ij = 1 / r_ij
+%
+% where:
+%
+%       r_ij = sqrt((x_j-x_i)^2 + (y_j-y_i)^2)
+%
+% The matrix A_i depends ONLY on mesh geometry, therefore it
+% can be precomputed once and reused for every timestep.
+%
+%       A_i * grad(phi_i) ~= b_i
+%
+% with:
+%
+%       A_i(row,:) = w_ij * [dx_ij, dy_ij]
+%
+% and:
+%
+%       A_i = Q_i * R_i
+%
+% IMPORTANT:
+% These WLSQ weights are different from the edge weights used
+% later by the GNN.
+% ============================================================
 
+
+fprintf('\n========================================\n');
+fprintf('WLSQ GEOMETRIC PRECOMPUTATION\n');
+fprintf('========================================\n');
+
+
+%% ------------------------------------------------------------
+%  Build neighbor list
+% ------------------------------------------------------------
+
+neighbors = cell(N,1);
+
+for e = 1:Nedges
+
+    node_i = edges(e,1);
+    node_j = edges(e,2);
+
+    % Undirected graph:
+    % i is neighbor of j and j is neighbor of i
+    neighbors{node_i}(end+1) = node_j;
+    neighbors{node_j}(end+1) = node_i;
+
+end
+
+
+%% ------------------------------------------------------------
+%  Allocate WLSQ structures
+% ------------------------------------------------------------
+
+A_wlsq = cell(N,1);
+Q_wlsq = cell(N,1);
+R_wlsq = cell(N,1);
+M_wlsq = cell(N,1);
+w_wlsq = cell(N,1);
+G_wlsq = cell(N,1);
+
+wlsq_rank = zeros(N,1);
+wlsq_cond = zeros(N,1);
+num_neighbors = zeros(N,1);
+
+
+%% ------------------------------------------------------------
+%  Construct A_i and compute QR for every graph node
+% ------------------------------------------------------------
+
+for node_i = 1:N
+
+    neigh = neighbors{node_i};
+
+    % Force column vector
+    neigh = neigh(:);
+
+    num_neighbors(node_i) = length(neigh);
+
+
+    % ---------------------------------------------------------
+    % Coordinates of central node
+    % ---------------------------------------------------------
+
+    xi = P(1,node_i);
+    yi = P(2,node_i);
+
+
+    % ---------------------------------------------------------
+    % Coordinates of neighboring nodes
+    % ---------------------------------------------------------
+
+    xj = P(1,neigh).';
+    yj = P(2,neigh).';
+
+
+    % ---------------------------------------------------------
+    % Relative coordinates
+    %
+    % dx = x_j - x_i
+    % dy = y_j - y_i
+    % ---------------------------------------------------------
+
+    dx_i = xj - xi;
+    dy_i = yj - yi;
+
+
+    % ---------------------------------------------------------
+    % Euclidean distance
+    % ---------------------------------------------------------
+
+    r_i = sqrt(dx_i.^2 + dy_i.^2);
+
+
+    % Safety check
+    if any(r_i <= eps)
+
+        error( ...
+            'Zero or invalid neighbor distance found at node %d.', ...
+            node_i ...
+        );
+
+    end
+
+
+    % ---------------------------------------------------------
+    % WLSQ weight
+    %
+    %       w_ij = 1 / r_ij
+    % ---------------------------------------------------------
+
+    w_i = 1 ./ r_i;
+
+
+    % ---------------------------------------------------------
+    % Construct WLSQ geometry matrix
+    %
+    %       A_i =
+    %
+    %       [ w_i1 dx_i1    w_i1 dy_i1 ]
+    %       [ w_i2 dx_i2    w_i2 dy_i2 ]
+    %       [     ...            ...    ]
+    %
+    % Dimensions:
+    %
+    %       number_of_neighbors x 2
+    % ---------------------------------------------------------
+
+    A_i = [
+        w_i .* dx_i, ...
+        w_i .* dy_i
+    ];
+
+
+    % ---------------------------------------------------------
+    % Check that the gradient can be reconstructed
+    % ---------------------------------------------------------
+
+    rank_i = rank(A_i);
+
+    if rank_i < 2
+
+        error( ...
+            'WLSQ matrix is rank deficient at node %d. Rank = %d.', ...
+            node_i, ...
+            rank_i ...
+        );
+
+    end
+
+
+    % ---------------------------------------------------------
+    % Economy QR decomposition
+    %
+    %       A_i = Q_i R_i
+    %
+    % Q_i : k_i x 2
+    % R_i : 2 x 2
+    % ---------------------------------------------------------
+
+    [Q_i, R_i] = qr(A_i, 0);
+    M_i = R_i \ Q_i.';
+    G_i = M_i .* w_i.';
+
+
+
+    % ---------------------------------------------------------
+    % Condition number
+    %
+    % Since R_i is only 2 x 2, this is extremely cheap.
+    % ---------------------------------------------------------
+
+    cond_i = cond(R_i);
+
+
+    % ---------------------------------------------------------
+    % Store results
+    % ---------------------------------------------------------
+
+    A_wlsq{node_i} = A_i;
+    Q_wlsq{node_i} = Q_i;
+    R_wlsq{node_i} = R_i;
+    M_wlsq{node_i} = M_i;
+    w_wlsq{node_i} = w_i;
+    G_wlsq{node_i} = G_i;
+
+    wlsq_rank(node_i) = rank_i;
+    wlsq_cond(node_i) = cond_i;
+
+end
+
+
+%% ------------------------------------------------------------
+%  WLSQ diagnostics
+% ------------------------------------------------------------
+
+fprintf('WLSQ preprocessing completed.\n\n');
+
+fprintf('Neighbors per node:\n');
+fprintf('  min    = %d\n', min(num_neighbors));
+fprintf('  mean   = %.2f\n', mean(num_neighbors));
+fprintf('  max    = %d\n\n', max(num_neighbors));
+
+fprintf('WLSQ matrix rank:\n');
+fprintf('  minimum rank = %d\n\n', min(wlsq_rank));
+
+fprintf('Condition number of R:\n');
+fprintf('  min    = %.6e\n', min(wlsq_cond));
+fprintf('  mean   = %.6e\n', mean(wlsq_cond));
+fprintf('  median = %.6e\n', median(wlsq_cond));
+fprintf('  max    = %.6e\n', max(wlsq_cond));
+
+
+%% ------------------------------------------------------------
+%  Show an example node
+% ------------------------------------------------------------
+
+example_node = find(num_neighbors == max(num_neighbors), 1);
+
+fprintf('\n========================================\n');
+fprintf('WLSQ EXAMPLE - NODE %d\n', example_node);
+fprintf('========================================\n');
+
+fprintf('Number of neighbors: %d\n', ...
+    num_neighbors(example_node));
+
+fprintf('Neighbors:\n');
+disp(neighbors{example_node});
+
+fprintf('A_i:\n');
+disp(A_wlsq{example_node});
+
+fprintf('Q_i:\n');
+disp(Q_wlsq{example_node});
+
+fprintf('R_i:\n');
+disp(R_wlsq{example_node});
+
+fprintf('rank(A_i) = %d\n', ...
+    wlsq_rank(example_node));
+
+fprintf('cond(R_i) = %.6e\n', ...
+    wlsq_cond(example_node));
+
+%% ============================================================
+%  9.2 VALIDATE WLSQ GRADIENT AGAINST COMSOL
+% ============================================================
+
+fprintf('\n========================================\n');
+fprintf('WLSQ GRADIENT VALIDATION\n');
+fprintf('========================================\n');
+
+% Choose one timestep for validation
+test_step = 100;
+
+fprintf('Test timestep index: %d\n', test_step);
+fprintf('Physical time: %.6e s\n\n', t(test_step));
+
+% COMSOL velocity field at this timestep
+u_test = u_nodes(test_step,:).';
+
+% Allocate reconstructed gradients
+du_dx_wlsq = zeros(N,1);
+du_dy_wlsq = zeros(N,1);
+
+
+for node_i = 1:N
+
+    % Neighbor indices
+    neigh = neighbors{node_i};
+    neigh = neigh(:);
+
+    % WLSQ weights previously computed
+    w_i = w_wlsq{node_i};
+
+    % Central value
+    u_i = u_test(node_i);
+
+    % Neighbor values
+    u_j = u_test(neigh);
+
+    % ---------------------------------------------------------
+    % Construct RHS:
+    %
+    % b_i(j) = w_ij * (u_j - u_i)
+    % ---------------------------------------------------------
+
+    b_i = w_i .* (u_j - u_i);
+
+
+    % ---------------------------------------------------------
+    % Solve:
+    %
+    % A_i grad(u_i) ~= b_i
+    %
+    % A_i = Q_i R_i
+    %
+    % therefore:
+    %
+    % R_i grad(u_i) = Q_i' b_i
+    % ---------------------------------------------------------
+
+    Q_i = Q_wlsq{node_i};
+    R_i = R_wlsq{node_i};
+    
+    rhs = Q_i.' * b_i;
+
+    grad_u_i = R_i \ rhs;
+
+
+    % Store gradient components
+    du_dx_wlsq(node_i) = grad_u_i(1);
+    du_dy_wlsq(node_i) = grad_u_i(2);
+
+end
+
+
+%% ------------------------------------------------------------
+% COMSOL reference
+% ------------------------------------------------------------
+
+du_dx_comsol = du_dx_nodes(test_step,:).';
+du_dy_comsol = du_dy_nodes(test_step,:).';
+
+
+%% ------------------------------------------------------------
+% Errors
+% ------------------------------------------------------------
+
+error_dx = du_dx_wlsq - du_dx_comsol;
+error_dy = du_dy_wlsq - du_dy_comsol;
+
+mae_dx = mean(abs(error_dx));
+mae_dy = mean(abs(error_dy));
+
+rmse_dx = sqrt(mean(error_dx.^2));
+rmse_dy = sqrt(mean(error_dy.^2));
+
+
+fprintf('du/dx:\n');
+fprintf('  MAE  = %.6e\n', mae_dx);
+fprintf('  RMSE = %.6e\n\n', rmse_dx);
+
+fprintf('du/dy:\n');
+fprintf('  MAE  = %.6e\n', mae_dy);
+fprintf('  RMSE = %.6e\n\n', rmse_dy);
+
+rel_l2_dx = norm(error_dx) / norm(du_dx_comsol);
+rel_l2_dy = norm(error_dy) / norm(du_dy_comsol);
+
+fprintf('Relative L2 error:\n');
+fprintf('  du/dx = %.6e  (%.2f%%)\n', ...
+    rel_l2_dx, 100*rel_l2_dx);
+
+fprintf('  du/dy = %.6e  (%.2f%%)\n', ...
+    rel_l2_dy, 100*rel_l2_dy);
 %% ============================================================
 %  10. COMPUTE GEOMETRIC EDGE WEIGHTS
 % ============================================================
@@ -706,7 +1092,24 @@ edge_index = [source - 1, target - 1];
 % Same weight for both directions
 edge_weight = [weights; weights];
 
+cell_index = T.' - 1;
 
+fprintf('cell_index  : %d x %d\n', ...
+    size(cell_index,1), ...
+    size(cell_index,2));
+
+%% ============================================================
+%  PREPARE WLSQ NEIGHBORS FOR PYTHON
+% ============================================================
+
+neighbors_python = cell(N,1);
+
+for node_i = 1:N
+    neighbors_python{node_i} = neighbors{node_i} - 1;
+end
+
+fprintf('neighbors_python : %d cells\n', ...
+    length(neighbors_python));
 %% ============================================================
 %  12. FINAL DATASET CHECKS
 % ============================================================
@@ -763,6 +1166,10 @@ save(output_file, ...
     'geometry_feature_names', ...
     'edge_index', ...
     'edge_weight', ...
+    'T', ...
+    'cell_index', ...
+    'neighbors_python', ...
+    'G_wlsq', ...
     'P', ...
     't', ...
     'h', ...

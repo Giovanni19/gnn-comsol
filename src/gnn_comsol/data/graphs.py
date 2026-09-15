@@ -136,6 +136,7 @@ def create_multi_simulation_graph_dataset(
             simulation[target_key],
             simulation["edge_index"],
             simulation["edge_weight"],
+            simulation_id=simulation["simulation_id"],
         )
 
         dataset.extend(simulation_dataset)

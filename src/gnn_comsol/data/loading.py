@@ -73,6 +73,12 @@ class RawDataset:
     delta_t: np.ndarray
     h: np.ndarray
     pos: np.ndarray
+
+    # WLSQ / physics-loss geometry
+    neighbors: list[np.ndarray] | None = None
+    G_wlsq: list[np.ndarray] | None = None
+    cell_index: np.ndarray | None = None
+
     physics_features: np.ndarray | None = None
     geometry_features: np.ndarray | None = None
     simulation_id: int | None = None
@@ -90,7 +96,35 @@ class RawDataset:
     def num_edges(self):
         return self.edge_index.shape[1]
 
+def _load_matlab_cell_array(f, key):
+    """
+    Load a MATLAB cell array stored in a v7.3 HDF5 .mat file.
 
+    Parameters
+    ----------
+    f : h5py.File
+        Open HDF5 file.
+
+    key : str
+        Name of the MATLAB cell array.
+
+    Returns
+    -------
+    list[np.ndarray] | None
+        Contents of the MATLAB cell array.
+    """
+
+    if key not in f:
+        return None
+
+    refs = np.array(f[key]).reshape(-1)
+
+    values = []
+
+    for ref in refs:
+        values.append(np.array(f[ref]))
+
+    return values
 def load_data(file_path, skip_initial=0, simulation_id=None):
     """
     Load one simulation and build the one-step-ahead pairs.
@@ -136,7 +170,20 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
         t = np.array(f["t"])
         h = np.array(f["h"])
         P = np.array(f["P"])
+        cell_index = (
+            np.array(f["cell_index"])
+            if "cell_index" in f
+            else None
+        )
+        neighbors = _load_matlab_cell_array(
+            f,
+            "neighbors_python",
+        )
 
+        G_wlsq = _load_matlab_cell_array(
+            f,
+            "G_wlsq",
+        )
         if "physics_features" in f:
             physics_features = np.array(
                 f["physics_features"]
@@ -150,7 +197,27 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             )
         else:
             geometry_features = None
+    if neighbors is not None:
 
+        neighbors = [
+            np.asarray(neigh)
+            .squeeze()
+            .astype(np.int64)
+            for neigh in neighbors
+        ]
+    if cell_index is not None:
+        if cell_index.shape[1] == 3:
+            pass
+        elif cell_index.shape[0] == 3:
+            cell_index = cell_index.T
+        else:
+            raise ValueError(
+                f"{file_path}: cell_index has unexpected "
+                f"shape {cell_index.shape}."
+            )
+
+        cell_index = cell_index.astype(np.int64)
+    
     # MATLAB stores arrays in Fortran order: (3, N, T) -> (T, N, 3)
     X = np.transpose(X, (2, 1, 0))
     if physics_features is not None:
@@ -230,16 +297,110 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             )
     num_nodes = X_input.shape[1]
 
-    # P may be stored as (N, 2) or (2, N)
+    # ------------------------------------------------------------
+    # Process WLSQ operators
+    # ------------------------------------------------------------
+
+    if G_wlsq is not None:
+
+        if neighbors is None:
+            raise ValueError(
+                f"{file_path}: G_wlsq exists but "
+                f"neighbors_python is missing."
+            )
+
+        if len(G_wlsq) != num_nodes:
+            raise ValueError(
+                f"{file_path}: G_wlsq contains "
+                f"{len(G_wlsq)} operators, "
+                f"but mesh has {num_nodes} nodes."
+            )
+
+        processed_G = []
+
+        for node_i, G_i in enumerate(G_wlsq):
+
+            G_i = np.asarray(G_i)
+
+            k_i = len(neighbors[node_i])
+
+            if G_i.shape == (2, k_i):
+                pass
+
+            elif G_i.shape == (k_i, 2):
+                G_i = G_i.T
+
+            else:
+                raise ValueError(
+                    f"{file_path}: G_wlsq[{node_i}] "
+                    f"has shape {G_i.shape}, "
+                    f"expected (2, {k_i})."
+                )
+
+            processed_G.append(G_i)
+
+        G_wlsq = processed_G
+
+
+    # ------------------------------------------------------------
+    # Check WLSQ neighbor indices
+    # ------------------------------------------------------------
+
+    if neighbors is not None:
+
+        if len(neighbors) != num_nodes:
+            raise ValueError(
+                f"{file_path}: neighbors contains "
+                f"{len(neighbors)} entries, "
+                f"but mesh has {num_nodes} nodes."
+            )
+
+        for node_i, neigh in enumerate(neighbors):
+
+            if np.any(neigh < 0) or np.any(neigh >= num_nodes):
+                raise ValueError(
+                    f"{file_path}: invalid WLSQ neighbor "
+                    f"indices for node {node_i}."
+                )
+
+
+    # ------------------------------------------------------------
+    # Check cell indices
+    # ------------------------------------------------------------
+
+    if cell_index is not None:
+
+        if np.any(cell_index < 0):
+            raise ValueError(
+                f"{file_path}: cell_index contains "
+                f"negative indices."
+            )
+
+        if np.any(cell_index >= num_nodes):
+            raise ValueError(
+                f"{file_path}: cell_index references "
+                f"a node outside the mesh."
+            )
+
+
+    # ------------------------------------------------------------
+    # Position array
+    # ------------------------------------------------------------
+
     if P.shape[0] == num_nodes:
         pos = P
+
     elif P.shape[1] == num_nodes:
         pos = P.T
+
     else:
         raise ValueError(
             f"{file_path}: position array P has shape {P.shape}, "
             f"but the state has {num_nodes} nodes."
         )
+    
+
+    
 
     # ------------------------------------------------------------
     # Geometry features: static per node, not per timestep.
@@ -290,10 +451,16 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
         delta_t=delta_t,
         h=h,
         pos=pos,
+
+        # WLSQ / physics-loss geometry
+        neighbors=neighbors,
+        G_wlsq=G_wlsq,
+        cell_index=cell_index,
+
         physics_features=physics_input,
         geometry_features=geometry_features,
         simulation_id=simulation_id,
-        file_path=str(file_path)
+        file_path=str(file_path),
     )
 
 

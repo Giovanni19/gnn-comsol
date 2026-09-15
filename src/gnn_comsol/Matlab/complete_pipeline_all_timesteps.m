@@ -11,13 +11,19 @@ import com.comsol.model.util.*
     prepare_gnn_comsol_pipeline();
 
 
+% Choose the BDF order used for the equivalent stationary problem:
+%
+%   1 -> BDF1
+%   2 -> variable-step BDF2
+%
+bdf_order = 1;
 %% ============================================================
 % TRANSITION RANGE
 % ============================================================
 
 % Test a small range first
 k_start = 1;
-k_end   = 100;
+k_end   = 20;
 
 if k_start < 1 || k_end > num_predictions || k_start > k_end
     error('Invalid transition range.');
@@ -43,7 +49,7 @@ fprintf('Number of tests  = %d\n', length(k_values));
 % ============================================================
 
 results = run_gnn_vs_standard_transitions( ...
-    model, G, t_comsol, dt_comsol, k_values);
+    model, G, t_comsol, dt_comsol, k_values, bdf_order);
 
 
 %% ============================================================

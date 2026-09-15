@@ -11,6 +11,8 @@ import copy
 
 import numpy as np
 import torch
+from gnn_comsol.data.normalization import VELOCITY_COLUMNS
+from gnn_comsol.physics.navier_stokes import continuity_loss
 
 def _prepare_batch(batch, net, device, target_columns):
     """
@@ -43,6 +45,99 @@ def _prepare_batch(batch, net, device, target_columns):
         target = batch.y[:, target_columns]
 
     return preds, target
+def _continuity_loss_for_batch(
+    batch,
+    preds,
+    physics_geometries,
+    normalizer,
+    device,
+):
+    """
+    Compute the mean continuity loss over all graphs in a PyG batch.
+
+    preds contains normalized velocity predictions.
+    Each graph may belong to a different simulation and therefore
+    may have a different WLSQ geometry.
+    """
+
+    graph_losses = []
+
+    for graph_i in range(batch.num_graphs):
+
+        # -----------------------------------------------------
+        # Nodes belonging to this graph inside the PyG batch
+        # -----------------------------------------------------
+
+        start = int(batch.ptr[graph_i].item())
+        end = int(batch.ptr[graph_i + 1].item())
+
+        pred_graph = preds[start:end]
+
+        # -----------------------------------------------------
+        # Recover simulation ID
+        # -----------------------------------------------------
+
+        simulation_id = int(
+            batch.simulation_id[graph_i].item()
+        )
+
+        geometry = physics_geometries[simulation_id]
+
+        # -----------------------------------------------------
+        # Normalized velocity -> physical velocity
+        # -----------------------------------------------------
+
+        pred_physical = normalizer.inverse_transform(
+            pred_graph,
+            columns=VELOCITY_COLUMNS,
+        )
+
+        u_pred = pred_physical[:, 0]
+        v_pred = pred_physical[:, 1]
+
+        # -----------------------------------------------------
+        # Convert static WLSQ geometry to torch
+        # -----------------------------------------------------
+
+        neighbors = [
+            torch.as_tensor(
+                neigh,
+                dtype=torch.long,
+                device=device,
+            )
+            for neigh in geometry["neighbors"]
+        ]
+
+        G_wlsq = [
+            torch.as_tensor(
+                G_i,
+                dtype=pred_physical.dtype,
+                device=device,
+            )
+            for G_i in geometry["G_wlsq"]
+        ]
+
+        cell_index = torch.as_tensor(
+            geometry["cell_index"],
+            dtype=torch.long,
+            device=device,
+        )
+
+        # -----------------------------------------------------
+        # Continuity loss for this graph
+        # -----------------------------------------------------
+
+        graph_loss = continuity_loss(
+            u_pred,
+            v_pred,
+            neighbors,
+            G_wlsq,
+            cell_index,
+        )
+
+        graph_losses.append(graph_loss)
+
+    return torch.stack(graph_losses).mean()
 
 def train_network(
     net,
@@ -53,7 +148,10 @@ def train_network(
     num_epochs,
     device,
     target_columns=slice(None),
-    verbose=True
+    physics_geometries=None,
+    normalizer=None,
+    continuity_weight=0.0,
+    verbose=True,
 ):
     """
     Train a network and keep the weights with the lowest validation loss.
@@ -105,7 +203,46 @@ def train_network(
                 target_columns,
             )
 
-            loss = criterion(preds, target)
+            loss_data = criterion(
+                preds,
+                target,
+            )
+
+            if continuity_weight > 0.0:
+
+                if physics_geometries is None:
+                    raise ValueError(
+                        "continuity_weight > 0 but "
+                        "physics_geometries is None."
+                    )
+
+                if normalizer is None:
+                    raise ValueError(
+                        "continuity_weight > 0 but "
+                        "normalizer is None."
+                    )
+
+                loss_continuity = _continuity_loss_for_batch(
+                    batch,
+                    preds,
+                    physics_geometries,
+                    normalizer,
+                    device,
+                )
+
+            else:
+
+                loss_continuity = torch.zeros(
+                    (),
+                    dtype=loss_data.dtype,
+                    device=device,
+                )
+
+
+            loss = (
+                loss_data
+                + continuity_weight * loss_continuity
+            )
 
             loss.backward()
             optimizer.step()

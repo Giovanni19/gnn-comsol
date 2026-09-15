@@ -533,6 +533,44 @@ def build_bsms_hierarchies(simulations, config):
 
     return bsms_hierarchies
 
+def build_physics_geometries(simulations):
+    """
+    Static WLSQ geometry for each simulation.
+
+    These quantities depend only on the mesh and are shared
+    by every timestep of the same simulation.
+    """
+
+    physics_geometries = {}
+
+    for simulation in simulations:
+
+        if simulation.neighbors is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                "has no WLSQ neighbors."
+            )
+
+        if simulation.G_wlsq is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                "has no G_wlsq operators."
+            )
+
+        if simulation.cell_index is None:
+            raise ValueError(
+                f"Simulation {simulation.simulation_id} "
+                "has no cell_index."
+            )
+
+        physics_geometries[simulation.simulation_id] = {
+            "neighbors": simulation.neighbors,
+            "G_wlsq": simulation.G_wlsq,
+            "cell_index": simulation.cell_index,
+        }
+
+    return physics_geometries
+
 def predict_velocity_for_simulation(
     velocity_model,
     simulation,
@@ -803,10 +841,12 @@ def train_one_network(
     network,
     network_loaders,
     bsms_hierarchies,
+    physics_geometries,
+    normalizer,
     config,
     criterion,
     device,
-    verbose
+    verbose,
 ):
     """
     Train every hyperparameter combination and keep the best.
@@ -961,6 +1001,7 @@ def train_all_networks(
     physics_normalizer,
     geometry_normalizer,
     delta_normalizer,
+    physics_geometries,
     dt_mean,
     dt_std,
     run_dir,
@@ -1019,10 +1060,12 @@ def train_all_networks(
             network,
             network_loaders,
             bsms_hierarchies,
+            physics_geometries,
+            normalizer,
             config,
             criterion,
             device,
-            verbose
+            verbose,
         )
 
         sweep_rows.extend(rows)
@@ -1271,6 +1314,9 @@ def main():
     )
 
     bsms_hierarchies = build_bsms_hierarchies(simulations, config)
+    physics_geometries = build_physics_geometries(
+        simulations
+    )
 
     velocity_loaders = build_velocity_loaders(normalized, config)
 
@@ -1284,6 +1330,7 @@ def main():
         physics_normalizer,
         geometry_normalizer,
         delta_normalizer,
+        physics_geometries,
         dt_mean,
         dt_std,
         run_dir,

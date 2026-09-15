@@ -1008,7 +1008,10 @@ def normalize_simulation(
         "edge_index": simulation.edge_index,
         "edge_weight": simulation.edge_weight,
         "pos": simulation.pos,
-
+        
+        "neighbors": simulation.neighbors,
+        "G_wlsq": simulation.G_wlsq,
+        "cell_index": simulation.cell_index,
         "simulation_id": simulation.simulation_id,
         "file_path": simulation.file_path,
     }
