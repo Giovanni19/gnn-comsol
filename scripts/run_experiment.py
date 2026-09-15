@@ -946,8 +946,7 @@ def train_one_network(
 
         else:
 
-            state, train_history, val_history = (
-                train_network(
+            state, train_history, val_history = train_network(
                     model,
                     network_loaders["train"],
                     network_loaders["val"],
@@ -956,9 +955,11 @@ def train_one_network(
                     num_epochs,
                     device,
                     target_columns=columns,
+                    physics_geometries=physics_geometries,
+                    normalizer=normalizer,
+                    continuity_weight=0.0,
                     verbose=verbose,
                 )
-            )
 
         best_val = min(val_history)
 
