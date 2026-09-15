@@ -327,9 +327,20 @@ def compute_multi_simulation_delta_normalization_parameters(
     subtract the absolute field's mean from a quantity that is not the
     absolute field.
 
-    Same convention as compute_multi_simulation_normalization_parameters:
-    du and dv share one mean/std, taken from the magnitude of the
-    velocity increment sqrt(du**2 + dv**2); dp gets its own.
+    du and dv share one mean and one standard deviation, for the same
+    reason u and v do in the absolute state: scaling the two components
+    separately would stretch the velocity increment along one axis and
+    destroy its isotropy. dp gets its own.
+
+    The shared statistics are POOLED over the two components, not taken
+    from the magnitude sqrt(du**2 + dv**2). The magnitude is a
+    non-negative quantity, so its mean is strictly positive, while du
+    and dv are centred near zero: subtracting it moved the training
+    target off centre by more than one standard deviation and left the
+    network to learn a large constant offset. The magnitude is the
+    right thing to take a SCALE from and the wrong thing to take a
+    LOCATION from, and only the scale is shared between the two
+    conventions.
 
     Returns
     -------
@@ -354,20 +365,17 @@ def compute_multi_simulation_delta_normalization_parameters(
 
         delta = simulation.Y_target - simulation.X_input
 
-        du = delta[:, :, 0]
-        dv = delta[:, :, 1]
+        # du and dv pooled into one sample: same statistics for both
+        # components, and those statistics are the components' own.
+        delta_velocity = delta[:, :, :2]
 
-        delta_velocity_magnitude = np.sqrt(du ** 2 + dv ** 2)
-
-        velocity_sum += np.sum(
-            delta_velocity_magnitude, dtype=np.float64
-        )
+        velocity_sum += np.sum(delta_velocity, dtype=np.float64)
 
         velocity_sum_sq += np.sum(
-            delta_velocity_magnitude ** 2, dtype=np.float64
+            delta_velocity ** 2, dtype=np.float64
         )
 
-        velocity_count += delta_velocity_magnitude.size
+        velocity_count += delta_velocity.size
 
         dp = delta[:, :, 2]
 

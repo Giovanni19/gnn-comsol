@@ -349,7 +349,12 @@ networks:
 The increment has a completely different scale from the absolute
 field — near zero, much smaller spread — so it is fitted its own
 `StateNormalizer` (`delta_normalizer` in the checkpoint) rather than
-reusing the state one. **What comes out of training and inference is
+reusing the state one. `Δu` and `Δv` share one mean and one standard
+deviation, so that scaling does not stretch the increment along one
+axis, and those shared statistics are **pooled over the two
+components**: they used to be taken from the magnitude
+`sqrt(Δu² + Δv²)`, whose mean cannot be negative, which left the
+training target centred around −1.8 instead of 0. **What comes out of training and inference is
 still always the absolute field**: `scripts/evaluate_test.py` adds the
 predicted physical increment back onto the physical input state before
 writing `gnn_predictions.mat`, so nothing downstream — the MATLAB
@@ -359,6 +364,71 @@ config-load time is `predict_delta: true` on `velocity` together with
 `use_predicted_velocity: true` on another network, because that
 predicted-velocity feature currently assumes the velocity network's raw
 output is already the absolute next state.
+
+**5. The physics-informed loss is a per-network weight.**
+
+`continuity_weight` and `momentum_weight` on the `velocity` network add
+the Navier-Stokes residuals of the *predicted* velocity to the data
+loss:
+
+```yaml
+networks:
+  velocity:
+    predicts: velocity
+    continuity_weight: 1.0e-3
+    momentum_weight: 1.0e-6
+
+fluid:
+  rho: 1.0
+  mu: 0.005
+```
+
+The discretization follows *A fully differentiable GNN-based PDE Solver*
+(Li et al., 2024): the variables live at the mesh vertices, the gradient
+is reconstructed there with the Weighted Least Squares method, and the
+residual `du/dx + dv/dy` is written on the cell-centered control volumes,
+where the three vertex gradients of a triangle are averaged. The WLSQ
+stencils (`neighbors_python`), their operators (`G_wlsq`) and the cell
+connectivity (`cell_index`) are computed once by `first_database.m` and
+shipped in the `.mat`; a dataset generated before that export simply has
+no physics loss available, and a config that asks for one anyway is
+refused by name.
+
+The momentum residual needs three things continuity does not: the
+density and viscosity of the fluid, the physical timestep of each
+transition, and a pressure. The first come from the `.mat` when
+`first_database.m` managed to read `spf.rho` and `spf.mu` out of the
+COMSOL model and from the `fluid:` section otherwise — the run says
+which, and stops by name if it has neither. The pressure is the one in
+the dataset, not one predicted by another network: the velocity network
+is scored against a teacher pressure, so the residual has a single
+unknown in it and cannot be lowered by exploiting a bad pressure. That
+is the decoupled strategy; training both networks together on a residual
+that contains both predictions is a different training loop and is not
+implemented.
+
+Two things are worth knowing before turning a weight up:
+
+- The residual is computed in **physical units**, on the absolute
+  velocity. For a `predict_delta: true` network the prediction is an
+  increment and is added back onto the current state first — with the
+  increment's own scaling, not the state's.
+- The residual of the COMSOL field itself is not zero: it is the
+  discretization floor, and no training can push a prediction below it.
+  COMSOL integrates with its own BDF scheme and reconstructs gradients
+  with finite elements, while the residual uses an IMEX step and WLSQ,
+  so the two disagree by something. `scripts/test_continuity_loss.py`
+  and `scripts/test_momentum_residual.py` print that floor for one
+  snapshot — the second one term by term, which is the only way to tell
+  a small residual from a meaningless one. **Run them before choosing a
+  weight.**
+
+By default the predicted velocity at boundary nodes is replaced by the
+true one before the residuals are computed (`enforce_boundary_values`),
+which is the hard imposition of boundary conditions of Sec. 2.4 of the
+paper: the WLSQ stencil of a boundary node is one-sided, so the residual
+there measures the discretization more than the prediction, and the
+boundary values are known anyway.
 
 ---
 

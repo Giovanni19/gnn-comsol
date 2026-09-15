@@ -39,7 +39,12 @@ from gnn_comsol.evaluate import (                         # noqa: E402
 )
 from gnn_comsol.graph.bsms import BistrideMultiLayerGraph  # noqa: E402
 from gnn_comsol.models import build_model                 # noqa: E402
+from gnn_comsol.physics import (                          # noqa: E402
+    FluidProperties,
+    PhysicsGeometry
+)
 from gnn_comsol.train import (                            # noqa: E402
+    PhysicsLoss,
     train_bsms_multi_simulation,
     train_network
 )
@@ -533,32 +538,57 @@ def build_bsms_hierarchies(simulations, config):
 
     return bsms_hierarchies
 
-def build_physics_geometries(simulations):
+def build_physics_geometries(simulations, config):
     """
-    Static WLSQ geometry for simulations that provide it.
+    Static mesh geometry for the simulations that provide it.
 
-    Simulations without WLSQ data are skipped. This allows
-    ordinary supervised training to use older datasets.
+    Simulations without WLSQ data are skipped. This allows ordinary
+    supervised training to use older datasets: a config that actually
+    asks for the physics loss fails later, by name, in PhysicsLoss.
+
+    The sparse operators and the control volumes are NOT built here:
+    they depend on the device and dtype of the training run, so each
+    PhysicsGeometry builds and caches them the first time it is used.
+
+    The fluid properties come from the .mat when COMSOL exported them
+    and from the experiment file otherwise. The .mat wins: it is what
+    the solver actually used, while the config is a number somebody
+    typed.
     """
+
+    fluid_config = config.get("fluid")
 
     physics_geometries = {}
 
     for simulation in simulations:
 
-        has_wlsq = (
-            simulation.neighbors is not None
-            and simulation.G_wlsq is not None
-            and simulation.cell_index is not None
+        fluid = FluidProperties.from_simulation(simulation)
+
+        if fluid is None:
+            fluid = FluidProperties.from_config(
+                fluid_config,
+                simulation.simulation_id,
+            )
+
+        geometry = PhysicsGeometry.from_simulation(
+            simulation,
+            fluid=fluid,
         )
 
-        if not has_wlsq:
+        if geometry is None:
             continue
 
-        physics_geometries[simulation.simulation_id] = {
-            "neighbors": simulation.neighbors,
-            "G_wlsq": simulation.G_wlsq,
-            "cell_index": simulation.cell_index,
-        }
+        physics_geometries[simulation.simulation_id] = geometry
+
+    if physics_geometries:
+
+        print(
+            f"\nMesh geometry for the physics loss: "
+            f"{len(physics_geometries)}/{len(simulations)} simulations"
+        )
+
+        for simulation_id, geometry in physics_geometries.items():
+            print(f"  Simulation {simulation_id}: {geometry}")
 
     return physics_geometries
 
@@ -834,6 +864,7 @@ def train_one_network(
     bsms_hierarchies,
     physics_geometries,
     normalizer,
+    delta_normalizer,
     config,
     criterion,
     device,
@@ -849,6 +880,49 @@ def train_one_network(
     architecture = network["architecture"]
 
     columns = gdata.TARGET_COLUMNS[network["predicts"]]
+
+    # The PDE residuals read columns 0 and 1 of the prediction as u and
+    # v, so they belong to a velocity network and to no other. The
+    # config validator rejects the other combinations; this is where
+    # the term is actually assembled, once per network rather than once
+    # per batch.
+    physics = None
+
+    has_physics = (
+        network["continuity_weight"] > 0.0
+        or network["momentum_weight"] > 0.0
+    )
+
+    if has_physics:
+
+        physics = PhysicsLoss(
+            geometries=physics_geometries,
+            normalizer=normalizer,
+            continuity_weight=network["continuity_weight"],
+            momentum_weight=network["momentum_weight"],
+            delta_normalizer=delta_normalizer,
+            predict_delta=network["predict_delta"],
+            enforce_boundary_values=network[
+                "enforce_boundary_values"
+            ],
+        )
+
+        print(
+            "Physics-informed residuals: "
+            + ", ".join(
+                f"{name} x{weight:g}"
+                for name, weight in (
+                    ("continuity", network["continuity_weight"]),
+                    ("momentum", network["momentum_weight"]),
+                )
+                if weight > 0
+            )
+            + (
+                " | boundary values imposed"
+                if network["enforce_boundary_values"]
+                else " | boundary values predicted"
+            )
+        )
 
     # The extra features follow from what the network DECLARES, never
     # from what it is called: deriving the input width from the name
@@ -938,19 +1012,17 @@ def train_one_network(
         else:
 
             state, train_history, val_history = train_network(
-                    model,
-                    network_loaders["train"],
-                    network_loaders["val"],
-                    criterion,
-                    optimizer,
-                    num_epochs,
-                    device,
-                    target_columns=columns,
-                    physics_geometries=physics_geometries,
-                    normalizer=normalizer,
-                    continuity_weight=0.0,
-                    verbose=verbose,
-                )
+                model,
+                network_loaders["train"],
+                network_loaders["val"],
+                criterion,
+                optimizer,
+                num_epochs,
+                device,
+                target_columns=columns,
+                physics=physics,
+                verbose=verbose,
+            )
 
         best_val = min(val_history)
 
@@ -1054,6 +1126,7 @@ def train_all_networks(
             bsms_hierarchies,
             physics_geometries,
             normalizer,
+            delta_normalizer,
             config,
             criterion,
             device,
@@ -1306,8 +1379,10 @@ def main():
     )
 
     bsms_hierarchies = build_bsms_hierarchies(simulations, config)
+
     physics_geometries = build_physics_geometries(
-        simulations
+        simulations,
+        config,
     )
 
     velocity_loaders = build_velocity_loaders(normalized, config)

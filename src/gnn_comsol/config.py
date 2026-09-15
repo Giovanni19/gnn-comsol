@@ -39,9 +39,21 @@ networks:
     use_geometry_features: bool     # BSMS only, default False
     use_predicted_velocity: bool    # BSMS only, default False
     predict_delta: bool             # any architecture, default False
+    continuity_weight: float        # velocity + non-BSMS only,
+                                    # default 0.0 (data loss alone)
+    momentum_weight: float          # idem; also needs `fluid` below
+    enforce_boundary_values: bool   # default True
+fluid:                       # read only when momentum_weight > 0, and
+  rho: float                 # only when the .mat does not carry them
+  mu: float                  # one pair for every simulation...
+  <simulation id>:           # ...or one pair per simulation
+    rho: float
+    mu: float
 
-Any of the last five may be a list, in which case every combination is
-trained and the one with the lowest validation loss is kept.
+The five sweepable fields (num_neurons, num_layers, dropout,
+learning_rate, weight_decay) may each be a list, in which case every
+combination is trained and the one with the lowest validation loss is
+kept.
 """
 
 import itertools
@@ -109,6 +121,26 @@ NETWORK_DEFAULTS = {
     # loader hands the network and how the prediction is reconstructed
     # back into an absolute state afterwards.
     "predict_delta": False,
+
+    # Weight of the physics-informed continuity residual
+    # div(u) = du/dx + dv/dy, evaluated on the cell-centered control
+    # volumes from the WLSQ gradients of the PREDICTED velocity. Zero
+    # trains on the data alone. The residual is a physical quantity,
+    # so the scale of a useful weight depends on the units of the
+    # simulation and not only on the architecture.
+    "continuity_weight": 0.0,
+
+    # Weight of the momentum residual. Unlike continuity, it needs the
+    # density and viscosity of the fluid (see the `fluid` section) and
+    # the physical timestep. The pressure it uses is the one in the
+    # dataset, not one predicted by another network.
+    "momentum_weight": 0.0,
+
+    # Replace the predicted velocity at boundary nodes with the true
+    # one before computing the residuals - the hard imposition of
+    # boundary conditions of the Gen-FVGN paper. Only has an effect
+    # when a physics weight is non-zero.
+    "enforce_boundary_values": True,
 }
 
 BSMS_DEFAULTS = {
@@ -318,6 +350,52 @@ def _validate(config, path):
                 f"{path}: network {name!r} has "
                 f"predict_delta={merged['predict_delta']!r}; it must be "
                 "true or false."
+            )
+
+        # The continuity residual needs a predicted u AND v to take the
+        # divergence of, and reads them from columns 0 and 1 of the
+        # network output. Attached to anything else it would either
+        # crash on a one-column prediction or, worse, take the
+        # divergence of something that is not a velocity.
+        for key in ("continuity_weight", "momentum_weight"):
+
+            weight = merged[key]
+
+            if not isinstance(weight, (int, float)):
+                raise ValueError(
+                    f"{path}: network {name!r} has {key}={weight!r}; "
+                    "it must be a number."
+                )
+
+            if weight < 0:
+                raise ValueError(
+                    f"{path}: network {name!r} has {key}={weight!r}; "
+                    "it must not be negative."
+                )
+
+            if weight == 0:
+                continue
+
+            if merged["predicts"] != "velocity":
+                raise ValueError(
+                    f"{path}: network {name!r} sets {key}={weight!r} "
+                    f"but has predicts={merged['predicts']!r}. The PDE "
+                    "residuals are written on a predicted velocity, so "
+                    "only a velocity network can carry them."
+                )
+
+            if merged["architecture"] == "bsms":
+                raise ValueError(
+                    f"{path}: network {name!r} sets {key}={weight!r}, "
+                    "but the BSMS training loop does not compute the "
+                    "physics residuals yet."
+                )
+
+        if not isinstance(merged["enforce_boundary_values"], bool):
+            raise ValueError(
+                f"{path}: network {name!r} has enforce_boundary_values="
+                f"{merged['enforce_boundary_values']!r}; "
+                "it must be true or false."
             )
 
         coverage[TARGET_COLUMNS[predicts]] += 1

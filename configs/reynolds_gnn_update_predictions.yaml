@@ -31,6 +31,20 @@ networks:
     features: time
     architecture: gcn
 
+    # Physics-informed terms, on the PREDICTED velocity: the continuity
+    # residual div(u), and the momentum residual against the pressure
+    # COMSOL computed. Both are reconstructed with WLSQ at the mesh
+    # nodes and integrated over the cell-centered control volumes.
+    # 0.0 trains on the data alone.
+    #
+    # They are physical quantities, so a useful weight depends on the
+    # units of the simulation. Measure the residual of the COMSOL field
+    # itself first - scripts/test_continuity_loss.py and
+    # scripts/test_momentum_residual.py - because that is the floor a
+    # prediction can be pushed down to.
+    continuity_weight: 0.0
+    momentum_weight: 0.0
+
     num_neurons: 64
     num_layers: 3
     dropout: 0.0
@@ -53,3 +67,21 @@ networks:
 
     num_layers: 1
     dropout: 0.0
+
+# Density and dynamic viscosity, in SI units. Only read when
+# momentum_weight > 0, and only for the simulations whose .mat does not
+# already carry them - first_database.m exports them when it can read
+# spf.rho and spf.mu out of the COMSOL model.
+#
+# One pair for every simulation:
+#
+# fluid:
+#   rho: 1.0
+#   mu: 0.005
+#
+# or one pair per simulation id, which is what a Reynolds sweep that
+# varies the viscosity needs:
+#
+# fluid:
+#   0: {rho: 1.0, mu: 0.025}
+#   1: {rho: 1.0, mu: 0.0167}

@@ -114,7 +114,8 @@ def write_config(
     name="smoke",
     allow_partial_state=False,
     dataset=None,
-    split=None
+    split=None,
+    fluid=None
 ):
 
     config = {
@@ -131,6 +132,9 @@ def write_config(
 
     if allow_partial_state:
         config["allow_partial_state"] = True
+
+    if fluid is not None:
+        config["fluid"] = fluid
 
     path = tmp_path / f"{name}.yaml"
 
@@ -215,6 +219,193 @@ def test_velocity_only_experiment_runs(simulations, tmp_path):
     loss = metrics["test_loss_normalized"]["velocity"]
 
     assert np.isfinite(loss) and loss >= 0
+
+
+def test_continuity_loss_experiment_runs(simulations, tmp_path):
+    """
+    The physics-informed path, end to end.
+
+    The weight is tiny on purpose: the point is not that the residual
+    improves anything in two epochs, it is that the residual is
+    computed on the right nodes of the right mesh and that its gradient
+    reaches the weights. Every graph in a batch may come from a
+    different simulation, so this also covers the per-graph lookup of
+    the WLSQ geometry.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {**VELOCITY_NET, "continuity_weight": 1.0e-6}
+        },
+        allow_partial_state=True,
+        name="smoke_continuity"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    loss = metrics["test_loss_normalized"]["velocity"]
+
+    assert np.isfinite(loss) and loss >= 0
+
+
+def test_continuity_loss_with_predicted_increment_runs(
+    simulations, tmp_path
+):
+    """
+    The same, for a network that predicts the INCREMENT.
+
+    The residual is the divergence of a velocity, and what this network
+    outputs is not one: it has to be added back onto the current state,
+    with the increment's own scaling, before it means anything. That
+    reconstruction has no shape to get wrong, so nothing but a test
+    that runs it would notice if it were skipped.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {
+                **VELOCITY_NET,
+                "predict_delta": True,
+                "continuity_weight": 1.0e-6
+            }
+        },
+        allow_partial_state=True,
+        name="smoke_continuity_delta"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    assert (run_dir / "velocity.pth").exists()
+
+
+def test_continuity_loss_without_wlsq_data_fails_clearly(
+    make_dataset, tmp_path
+):
+    """
+    Asking for the physics loss on .mat files that predate the WLSQ
+    export must say so, not train on the data term alone and report a
+    physics-informed run.
+    """
+
+    simulations = [
+        make_dataset(
+            rows=rows,
+            cols=cols,
+            seed=index,
+            num_snapshots=14,
+            with_wlsq=False
+        )
+        for index, (rows, cols) in enumerate(MESHES)
+    ]
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {**VELOCITY_NET, "continuity_weight": 1.0e-6}
+        },
+        allow_partial_state=True,
+        name="smoke_continuity_missing"
+    )
+
+    with pytest.raises(ValueError, match="WLSQ"):
+        run(config, tmp_path / "outputs")
+
+
+def test_momentum_loss_experiment_runs(simulations, tmp_path):
+    """
+    The momentum residual, end to end, with the fluid properties coming
+    from the experiment file.
+
+    This is the path with the most ways to go quietly wrong: it needs
+    the physical timestep of each transition, the true pressure of the
+    NEXT state, and the current state, all three pulled out of a batch
+    that interleaves several meshes.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {
+                **VELOCITY_NET,
+                "continuity_weight": 1.0e-6,
+                "momentum_weight": 1.0e-6
+            }
+        },
+        allow_partial_state=True,
+        fluid={"rho": 1.0, "mu": 0.01},
+        name="smoke_momentum"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    loss = metrics["test_loss_normalized"]["velocity"]
+
+    assert np.isfinite(loss) and loss >= 0
+
+
+def test_momentum_loss_reads_fluid_from_the_mat(make_dataset, tmp_path):
+    """
+    When COMSOL exported rho and mu, they are used and the experiment
+    file does not have to repeat them.
+    """
+
+    simulations = [
+        make_dataset(
+            rows=rows,
+            cols=cols,
+            seed=index,
+            num_snapshots=14,
+            fluid={"rho": 998.0, "mu": 1.0e-3}
+        )
+        for index, (rows, cols) in enumerate(MESHES)
+    ]
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {**VELOCITY_NET, "momentum_weight": 1.0e-9}
+        },
+        allow_partial_state=True,
+        name="smoke_momentum_mat"
+    )
+
+    run_dir = run(config, tmp_path / "outputs")
+
+    assert (run_dir / "velocity.pth").exists()
+
+
+def test_momentum_loss_without_fluid_properties_fails_clearly(
+    simulations, tmp_path
+):
+    """
+    Density and viscosity cannot be recovered from a velocity field, so
+    a momentum residual without them is not a residual at all. The run
+    has to stop and say where to put them.
+    """
+
+    config = write_config(
+        tmp_path,
+        simulations,
+        networks={
+            "velocity": {**VELOCITY_NET, "momentum_weight": 1.0e-6}
+        },
+        allow_partial_state=True,
+        name="smoke_momentum_no_fluid"
+    )
+
+    with pytest.raises(ValueError, match="rho"):
+        run(config, tmp_path / "outputs")
 
 
 def test_split_reported_in_metrics_covers_every_simulation(

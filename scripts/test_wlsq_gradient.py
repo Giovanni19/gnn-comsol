@@ -1,7 +1,20 @@
+"""
+Check the WLSQ gradient on a real dataset, against MATLAB and against
+the one field whose gradient is known exactly.
+
+Run on the machine that has the .mat files:
+
+    python scripts/test_wlsq_gradient.py
+"""
+
 import torch
 
 from gnn_comsol.data.loading import load_data
-from gnn_comsol.physics.wlsq import wlsq_gradient
+from gnn_comsol.physics import (
+    build_wlsq_operators,
+    wlsq_gradient,
+    wlsq_gradient_reference,
+)
 
 
 dataset_path = (
@@ -21,18 +34,20 @@ data = load_data(
 
 
 # ============================================================
-# CONVERT WLSQ GEOMETRY TO TORCH
+# BUILD THE SPARSE WLSQ OPERATORS
+# ============================================================
+#
+# float64 here: this script is checking the discretization, not
+# imitating the training run, and a float32 operator would put its own
+# rounding error on top of the one being measured.
 # ============================================================
 
-neighbors = [
-    torch.as_tensor(neigh, dtype=torch.long)
-    for neigh in data.neighbors
-]
-
-G_wlsq = [
-    torch.as_tensor(G_i, dtype=torch.float64)
-    for G_i in data.G_wlsq
-]
+operators = build_wlsq_operators(
+    data.neighbors,
+    data.G_wlsq,
+    num_nodes=data.num_nodes,
+    dtype=torch.float64,
+)
 
 
 # ============================================================
@@ -61,11 +76,7 @@ u = torch.as_tensor(
 # WLSQ GRADIENT
 # ============================================================
 
-grad_u = wlsq_gradient(
-    u,
-    neighbors,
-    G_wlsq,
-)
+grad_u = wlsq_gradient(u, operators)
 
 du_dx_wlsq = grad_u[:, 0]
 du_dy_wlsq = grad_u[:, 1]
@@ -85,8 +96,48 @@ print("\ndu/dy:")
 print("min :", du_dy_wlsq.min().item())
 print("max :", du_dy_wlsq.max().item())
 
+
+# ============================================================
+# SPARSE OPERATOR vs THE PER-NODE DEFINITION
+# ============================================================
+#
+# The sparse operator is an algebraic rearrangement of the per-node
+# formula, so the two must agree to round-off. If they do not, the
+# assembly is wrong, and every number above is wrong with it.
+# ============================================================
+
+neighbors = [
+    torch.as_tensor(neigh, dtype=torch.long)
+    for neigh in data.neighbors
+]
+
+G_wlsq = [
+    torch.as_tensor(G_i, dtype=torch.float64)
+    for G_i in data.G_wlsq
+]
+
+grad_u_reference = wlsq_gradient_reference(
+    u,
+    neighbors,
+    G_wlsq,
+)
+
+print("\n========================================")
+print("SPARSE OPERATOR vs PER-NODE REFERENCE")
+print("========================================")
+
+print(
+    "max abs difference:",
+    (grad_u - grad_u_reference).abs().max().item(),
+)
+
+
 # ============================================================
 # EXACT LINEAR FIELD TEST
+# ============================================================
+#
+# WLSQ reconstructs a linear field exactly, whatever the mesh, so the
+# error here is round-off and nothing else.
 # ============================================================
 
 pos = torch.as_tensor(
@@ -99,11 +150,7 @@ y = pos[:, 1]
 
 phi = 2.0 * x + 3.0 * y + 5.0
 
-grad_phi = wlsq_gradient(
-    phi,
-    neighbors,
-    G_wlsq,
-)
+grad_phi = wlsq_gradient(phi, operators)
 
 error_x = torch.abs(grad_phi[:, 0] - 2.0)
 error_y = torch.abs(grad_phi[:, 1] - 3.0)

@@ -55,6 +55,110 @@ def grid_mesh(rows, cols, spacing=1.0):
     return np.array(edges).T, pos
 
 
+def grid_cells(rows, cols):
+    """
+    The grid of `grid_mesh`, cut into triangles.
+
+    Returns (Nc, 3) node indices, two triangles per square, which is
+    what the COMSOL mesh gives and what the cell-centered residual is
+    written on.
+    """
+
+    def node(r, c):
+        return r * cols + c
+
+    cells = []
+
+    for r in range(rows - 1):
+        for c in range(cols - 1):
+
+            cells.append(
+                [node(r, c), node(r, c + 1), node(r + 1, c)]
+            )
+
+            cells.append(
+                [node(r, c + 1), node(r + 1, c + 1), node(r + 1, c)]
+            )
+
+    return np.array(cells, dtype=np.int64)
+
+
+def wlsq_operators(edge_index, pos):
+    """
+    The WLSQ stencils and operators, as first_database.m computes them.
+
+    For every node i, with neighbours j and w_ij = 1 / |x_j - x_i|:
+
+        A_i = w_i * [dx_i, dy_i]        (k_i, 2)
+        A_i = Q_i R_i                   economy QR
+        G_i = (R_i^-1 Q_i^T) * w_i      (2, k_i)
+
+    so that grad(phi)_i = G_i @ (phi_j - phi_i). Duplicated here rather
+    than imported because the point of the tests that use it is to check
+    the Python side against an independent transcription of the MATLAB.
+
+    Returns (neighbors, G_wlsq).
+    """
+
+    num_nodes = pos.shape[0]
+
+    stencils = [[] for _ in range(num_nodes)]
+
+    for source, target in edge_index.T:
+
+        if target not in stencils[source]:
+            stencils[source].append(int(target))
+
+    neighbors = []
+    G_wlsq = []
+
+    for node_i in range(num_nodes):
+
+        neigh = np.array(sorted(stencils[node_i]), dtype=np.int64)
+
+        delta = pos[neigh] - pos[node_i]
+
+        weight = 1.0 / np.linalg.norm(delta, axis=1)
+
+        A = weight[:, None] * delta
+
+        Q, R = np.linalg.qr(A)
+
+        G = np.linalg.inv(R) @ Q.T * weight[None, :]
+
+        neighbors.append(neigh)
+        G_wlsq.append(G)
+
+    return neighbors, G_wlsq
+
+
+def write_matlab_cell(f, key, arrays):
+    """
+    Write a list of arrays the way MATLAB writes a cell array to a
+    v7.3 .mat: a dataset of object references, one per cell.
+    """
+
+    group = f.require_group("#refs#")
+
+    references = []
+
+    for index, array in enumerate(arrays):
+
+        name = f"{key}_{index}"
+
+        group[name] = np.asarray(array)
+
+        references.append(group[name].ref)
+
+    dataset = f.create_dataset(
+        key,
+        shape=(1, len(references)),
+        dtype=h5py.special_dtype(ref=h5py.Reference)
+    )
+
+    dataset[0, :] = references
+
+
 def write_dataset(
     path,
     num_snapshots=16,
@@ -64,7 +168,9 @@ def write_dataset(
     marker_snapshots=False,
     transpose_positions=False,
     with_physics=True,
-    with_geometry=True
+    with_geometry=True,
+    with_wlsq=True,
+    fluid=None
 ):
     """
     Write one synthetic simulation in the layout load_data expects.
@@ -94,6 +200,18 @@ def write_dataset(
         Include the geometry_features array. True by default, for the
         same reason as with_physics. Pass False for the older,
         pre-geometry-features layout.
+
+    with_wlsq : bool
+        Include the WLSQ stencils, operators and cell connectivity the
+        physics loss needs. Written in the MATLAB orientation, i.e.
+        transposed, since that is how h5py hands them back. Pass False
+        for a .mat from before the WLSQ export.
+
+    fluid : dict, optional
+        {"rho": ..., "mu": ...} to write as the fluid properties, as a
+        first_database.m that managed to read them out of COMSOL
+        would. Absent by default, which is the case the experiment
+        file has to cover.
 
     Returns
     -------
@@ -128,6 +246,10 @@ def write_dataset(
     t = np.concatenate([[0.0], np.cumsum(steps)])
 
     stored_pos = pos.T if transpose_positions else pos
+
+    cell_index = grid_cells(rows, cols)
+
+    neighbors, G_wlsq = wlsq_operators(edge_index, pos)
 
     # The five physics-derived features COMSOL now exports:
     # du/dx, du/dy, dv/dx, dv/dy and div[(u . grad)u]. They are given
@@ -182,6 +304,34 @@ def write_dataset(
             # this orientation directly, no transpose needed.
             f["geometry_features"] = geometry_features
 
+        if with_wlsq:
+
+            # MATLAB axis order again, and the reason the corner nodes
+            # of this grid matter: they have exactly two neighbours, so
+            # their G_i is square and its orientation cannot be
+            # recovered from its shape.
+            #
+            #   neighbors_python[i] : MATLAB (1, k) -> (k, 1)
+            #   G_wlsq[i]           : MATLAB (2, k) -> (k, 2)
+            #   cell_index          : MATLAB (Nc, 3) -> (3, Nc)
+            write_matlab_cell(
+                f,
+                "neighbors_python",
+                [neigh.reshape(-1, 1) for neigh in neighbors]
+            )
+
+            write_matlab_cell(
+                f,
+                "G_wlsq",
+                [G.T for G in G_wlsq]
+            )
+
+            f["cell_index"] = cell_index.T
+
+        if fluid is not None:
+            f["rho"] = np.array([[float(fluid["rho"])]])
+            f["mu"] = np.array([[float(fluid["mu"])]])
+
     return {
         "path": path,
         "X": X,
@@ -192,7 +342,11 @@ def write_dataset(
         "geometry_features": geometry_features,
         "num_nodes": num_nodes,
         "num_edges": edge_index.shape[1],
-        "num_snapshots": num_snapshots
+        "num_snapshots": num_snapshots,
+        "cell_index": cell_index if with_wlsq else None,
+        "neighbors": neighbors if with_wlsq else None,
+        "G_wlsq": G_wlsq if with_wlsq else None,
+        "fluid": fluid
     }
 
 

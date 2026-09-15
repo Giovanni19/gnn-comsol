@@ -444,3 +444,120 @@ def test_predicted_velocity_from_a_delta_velocity_network_is_rejected(
 
     with pytest.raises(ValueError, match="predict_delta=true"):
         load_config(write(tmp_path, broken))
+
+
+# =====================================================================
+# The physics-informed continuity term
+# =====================================================================
+
+def test_continuity_weight_defaults_to_zero(tmp_path):
+    """A config that says nothing about physics trains on data alone."""
+
+    config = load_config(write(tmp_path, BASE))
+
+    for network in config["networks"].values():
+        assert network["continuity_weight"] == 0.0
+
+
+def test_continuity_weight_is_accepted_on_a_velocity_network(tmp_path):
+
+    custom = {
+        **BASE,
+        "networks": {
+            **BASE["networks"],
+            "velocity": {
+                **BASE["networks"]["velocity"],
+                "continuity_weight": 1.0e-3
+            }
+        }
+    }
+
+    config = load_config(write(tmp_path, custom))
+
+    assert config["networks"]["velocity"]["continuity_weight"] == 1.0e-3
+
+
+def test_continuity_weight_is_rejected_on_a_pressure_network(tmp_path):
+    """
+    The residual is the divergence of a predicted velocity. On a
+    pressure network there is no velocity to take the divergence of,
+    and the prediction has one column rather than two.
+    """
+
+    custom = {
+        **BASE,
+        "networks": {
+            **BASE["networks"],
+            "pressure": {
+                **BASE["networks"]["pressure"],
+                "continuity_weight": 1.0e-3
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="velocity"):
+        load_config(write(tmp_path, custom))
+
+
+@pytest.mark.parametrize("weight", [-1.0, "a lot"])
+def test_invalid_continuity_weight_is_rejected(tmp_path, weight):
+
+    custom = {
+        **BASE,
+        "networks": {
+            **BASE["networks"],
+            "velocity": {
+                **BASE["networks"]["velocity"],
+                "continuity_weight": weight
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="continuity_weight"):
+        load_config(write(tmp_path, custom))
+
+
+def test_momentum_weight_is_rejected_on_a_pressure_network(tmp_path):
+
+    custom = {
+        **BASE,
+        "networks": {
+            **BASE["networks"],
+            "pressure": {
+                **BASE["networks"]["pressure"],
+                "momentum_weight": 1.0e-3
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="velocity"):
+        load_config(write(tmp_path, custom))
+
+
+def test_enforce_boundary_values_defaults_to_true(tmp_path):
+    """
+    The boundary conditions are known, so by default the residual is
+    not asked to learn them.
+    """
+
+    config = load_config(write(tmp_path, BASE))
+
+    for network in config["networks"].values():
+        assert network["enforce_boundary_values"] is True
+
+
+def test_enforce_boundary_values_must_be_boolean(tmp_path):
+
+    custom = {
+        **BASE,
+        "networks": {
+            **BASE["networks"],
+            "velocity": {
+                **BASE["networks"]["velocity"],
+                "enforce_boundary_values": "yes"
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="enforce_boundary_values"):
+        load_config(write(tmp_path, custom))

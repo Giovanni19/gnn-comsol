@@ -1111,6 +1111,94 @@ end
 fprintf('neighbors_python : %d cells\n', ...
     length(neighbors_python));
 %% ============================================================
+%  FLUID PROPERTIES FOR THE PHYSICS LOSS
+% ============================================================
+%
+% The momentum residual on the Python side needs the density and the
+% dynamic viscosity the solver actually used. They cannot be recovered
+% from the state: a velocity field is consistent with infinitely many
+% fluids at infinitely many pressures.
+%
+% 'spf.rho' and 'spf.mu' are the fluid properties of the Laminar Flow
+% interface, whose tag is 'spf' in this model (see
+% run_gnn_vs_standard_transitions.m, which reaches for
+% model.component('comp1').physics('spf')).
+%
+% IF THESE NAMES DO NOT RESOLVE, NOTHING BREAKS. The export is skipped,
+% this script says so, and the Python side takes rho and mu from the
+% experiment YAML instead:
+%
+%     fluid:
+%       rho: 1.0
+%       mu: 0.005
+%
+% It is deliberately a skip and not an error: a wrong guess written
+% into the dataset would be used silently, while an absent value is
+% asked for out loud.
+% ============================================================
+
+fprintf('\n========================================\n');
+fprintf('FLUID PROPERTIES\n');
+fprintf('========================================\n');
+
+export_fluid = true;
+
+try
+
+    rho_nodes = mphinterp(model, 'spf.rho', ...
+        'coord', P, ...
+        'dataset', dataset_tag, ...
+        'solnum', 'all');
+
+    mu_nodes = mphinterp(model, 'spf.mu', ...
+        'coord', P, ...
+        'dataset', dataset_tag, ...
+        'solnum', 'all');
+
+catch err
+
+    export_fluid = false;
+
+    fprintf('Could not evaluate spf.rho / spf.mu:\n  %s\n', ...
+        err.message);
+
+    fprintf(['The dataset will be written WITHOUT rho and mu. ', ...
+        'Put them in the experiment YAML, or fix the variable ', ...
+        'names above.\n']);
+
+end
+
+if export_fluid
+
+    % Constant in space and in time? The Python residual takes one
+    % number per simulation; a property that varies would need to be
+    % exported per node, and it is better to find that out here than
+    % to average it away without saying so.
+    rho_spread = max(rho_nodes(:)) - min(rho_nodes(:));
+    mu_spread  = max(mu_nodes(:))  - min(mu_nodes(:));
+
+    rho = mean(rho_nodes(:));
+    mu  = mean(mu_nodes(:));
+
+    fprintf('rho = %.6g kg/m^3   (spread %.3g)\n', rho, rho_spread);
+    fprintf('mu  = %.6g Pa s     (spread %.3g)\n', mu, mu_spread);
+    fprintf('nu  = %.6g m^2/s\n', mu / rho);
+
+    if rho_spread > 1e-9 * abs(rho) || mu_spread > 1e-9 * abs(mu)
+
+        export_fluid = false;
+
+        fprintf(['\nThese are NOT constant over the mesh or over ', ...
+            'time, so a single number would misrepresent them. ', ...
+            'The export is skipped; the Python momentum residual ', ...
+            'assumes a constant fluid.\n']);
+
+    end
+
+end
+
+
+%% ============================================================
 %  12. FINAL DATASET CHECKS
 % ============================================================
 
@@ -1174,6 +1262,14 @@ save(output_file, ...
     't', ...
     'h', ...
     '-v7.3');
+
+if export_fluid
+
+    save(output_file, 'rho', 'mu', '-append');
+
+    fprintf('Fluid properties appended: rho, mu\n');
+
+end
 
 fprintf('\nDataset saved successfully:\n%s\n', output_file);
 

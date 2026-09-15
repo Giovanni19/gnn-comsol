@@ -319,10 +319,26 @@ def test_delta_parameters_pool_meshes_of_different_sizes():
     assert mean.shape == (3,)
     assert std.shape == (3,)
 
-    # du and dv share one mean/std, taken from the magnitude of the
-    # velocity increment - same convention as the absolute-state one.
+    # du and dv share one mean/std, pooled over the two components, so
+    # that normalizing does not stretch the increment along one axis.
     assert mean[0] == mean[1]
     assert std[0] == std[1]
+
+    # Pooled from the components themselves, NOT from the magnitude
+    # sqrt(du**2 + dv**2): the magnitude cannot be negative, so its
+    # mean is strictly positive, while the increment is centred near
+    # zero. Using it as the location parameter decentred the target.
+    deltas = np.concatenate([
+        (s.Y_target - s.X_input)[:, :, :2].ravel()
+        for s in simulations
+    ])
+
+    assert mean[0] == pytest.approx(deltas.mean())
+
+    # + 1e-8 is the guard against a degenerate, constant field
+    assert std[0] == pytest.approx(deltas.std() + 1e-8, rel=1e-9)
+
+    assert abs(mean[0]) < std[0]
 
 
 def test_delta_normalizer_is_not_the_state_normalizer():
@@ -331,6 +347,14 @@ def test_delta_normalizer_is_not_the_state_normalizer():
     centred near zero and much smaller than the absolute field, so
     reusing StateNormalizer's own parameters on it would neither centre
     nor whiten it.
+
+    What "centred" can mean here is limited by the convention: du and
+    dv share one mean and one std, so the two components cannot both
+    come out with exactly zero mean and unit variance unless they
+    happen to have identical statistics. What the normalizer does
+    promise is that the velocity increment POOLED over its two
+    components is centred and whitened, that pressure - which has its
+    own parameters - is exactly so, and that the round trip is exact.
     """
 
     simulations = [delta_simulation(0, 200, 15, seed=7)]
@@ -354,8 +378,22 @@ def test_delta_normalizer_is_not_the_state_normalizer():
 
     normalized = delta_normalizer.transform(delta)
 
-    assert np.allclose(normalized.mean(axis=(0, 1)), 0.0, atol=1e-6)
-    assert np.allclose(normalized.std(axis=(0, 1)), 1.0, atol=1e-6)
+    velocity = normalized[:, :, :2]
+
+    # The tolerance on the spread is loose enough to absorb the 1e-8
+    # added to every std, which is a relative 1e-6 on an increment this
+    # small, and tight enough to catch a scale that is actually wrong.
+    assert velocity.mean() == pytest.approx(0.0, abs=1e-6)
+    assert velocity.std() == pytest.approx(1.0, abs=1e-5)
+
+    assert normalized[:, :, 2].mean() == pytest.approx(0.0, abs=1e-6)
+    assert normalized[:, :, 2].std() == pytest.approx(1.0, abs=1e-5)
+
+    # Each component on its own stays within a small fraction of a
+    # standard deviation of zero. This is the assertion that fails if
+    # the location parameter ever goes back to the velocity magnitude,
+    # which put it at roughly -1.8.
+    assert np.all(np.abs(velocity.mean(axis=(0, 1))) < 0.1)
 
     assert np.allclose(
         delta_normalizer.inverse_transform(normalized), delta

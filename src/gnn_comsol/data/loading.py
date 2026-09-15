@@ -79,6 +79,12 @@ class RawDataset:
     G_wlsq: list[np.ndarray] | None = None
     cell_index: np.ndarray | None = None
 
+    # Fluid properties, needed by the momentum residual only. None when
+    # the .mat does not carry them, in which case the experiment file
+    # has to supply them - see physics.fluid.
+    rho: float | None = None
+    mu: float | None = None
+
     physics_features: np.ndarray | None = None
     geometry_features: np.ndarray | None = None
     simulation_id: int | None = None
@@ -125,6 +131,156 @@ def _load_matlab_cell_array(f, key):
         values.append(np.array(f[ref]))
 
     return values
+
+
+def _load_optional_scalar(f, key):
+    """
+    One number from the .mat, or None if the file does not have it.
+
+    MATLAB writes a scalar as a 1x1 array, and a value that is present
+    but not a single number is a mistake worth reporting rather than
+    silently reducing.
+    """
+
+    if key not in f:
+        return None
+
+    value = np.array(f[key]).reshape(-1)
+
+    if value.size != 1:
+        raise ValueError(
+            f"{key} must be a single number, "
+            f"but has {value.size} elements."
+        )
+
+    return float(value[0])
+
+
+def _process_wlsq(
+    neighbors,
+    G_wlsq,
+    cell_index,
+    num_nodes,
+    file_path,
+):
+    """
+    Bring the WLSQ export into the layout the physics loss expects.
+
+    MATLAB writes arrays to a v7.3 .mat in Fortran order, so h5py hands
+    every one of them back with its dimensions REVERSED - the same rule
+    that turns the (T, N, 3) state into (3, N, T). The orientation is
+    therefore not guessed from the shape: a G_i of a node with exactly
+    two neighbours is (2, 2) either way, and guessing left it silently
+    transposed, giving wrong gradients at the corners of the domain.
+
+    Returns the triple (neighbors, G_wlsq, cell_index), any of which may
+    be None: the older .mat files predate the WLSQ export.
+    """
+
+    # --------------------------------------------------------------
+    # Stencils: MATLAB (1, k_i) -> h5py (k_i, 1) -> (k_i,)
+    # --------------------------------------------------------------
+
+    if neighbors is not None:
+
+        if len(neighbors) != num_nodes:
+            raise ValueError(
+                f"{file_path}: neighbors_python contains "
+                f"{len(neighbors)} entries, "
+                f"but the mesh has {num_nodes} nodes."
+            )
+
+        # reshape(-1), not squeeze(): squeeze() on the stencil of a node
+        # with a single neighbour would return a 0-d array.
+        neighbors = [
+            np.asarray(neigh).reshape(-1).astype(np.int64)
+            for neigh in neighbors
+        ]
+
+        for node_i, neigh in enumerate(neighbors):
+
+            if neigh.size < 2:
+                raise ValueError(
+                    f"{file_path}: node {node_i} has {neigh.size} WLSQ "
+                    "neighbor(s); at least 2 are needed to reconstruct "
+                    "a 2D gradient."
+                )
+
+            if np.any(neigh < 0) or np.any(neigh >= num_nodes):
+                raise ValueError(
+                    f"{file_path}: invalid WLSQ neighbor "
+                    f"indices for node {node_i}."
+                )
+
+    # --------------------------------------------------------------
+    # Operators: MATLAB (2, k_i) -> h5py (k_i, 2) -> (2, k_i)
+    # --------------------------------------------------------------
+
+    if G_wlsq is not None:
+
+        if neighbors is None:
+            raise ValueError(
+                f"{file_path}: G_wlsq exists but "
+                f"neighbors_python is missing."
+            )
+
+        if len(G_wlsq) != num_nodes:
+            raise ValueError(
+                f"{file_path}: G_wlsq contains "
+                f"{len(G_wlsq)} operators, "
+                f"but the mesh has {num_nodes} nodes."
+            )
+
+        processed_G = []
+
+        for node_i, G_i in enumerate(G_wlsq):
+
+            G_i = np.asarray(G_i, dtype=np.float64)
+
+            k_i = neighbors[node_i].size
+
+            if G_i.shape != (k_i, 2):
+                raise ValueError(
+                    f"{file_path}: G_wlsq[{node_i}] has shape "
+                    f"{G_i.shape}; MATLAB writes it as (2, {k_i}), "
+                    f"so h5py must read it back as ({k_i}, 2)."
+                )
+
+            processed_G.append(G_i.T)
+
+        G_wlsq = processed_G
+
+    # --------------------------------------------------------------
+    # Cells: MATLAB (Nc, 3) -> h5py (3, Nc) -> (Nc, 3)
+    # --------------------------------------------------------------
+
+    if cell_index is not None:
+
+        if cell_index.shape[0] != 3:
+            raise ValueError(
+                f"{file_path}: cell_index has shape "
+                f"{cell_index.shape}; MATLAB writes it as (Nc, 3), so "
+                "h5py must read it back as (3, Nc)."
+            )
+
+        cell_index = cell_index.T.astype(np.int64)
+
+        if np.any(cell_index < 0):
+            raise ValueError(
+                f"{file_path}: cell_index contains "
+                f"negative indices. It must be zero-based: "
+                f"first_database.m exports T.' - 1."
+            )
+
+        if np.any(cell_index >= num_nodes):
+            raise ValueError(
+                f"{file_path}: cell_index references "
+                f"a node outside the mesh."
+            )
+
+    return neighbors, G_wlsq, cell_index
+
+
 def load_data(file_path, skip_initial=0, simulation_id=None):
     """
     Load one simulation and build the one-step-ahead pairs.
@@ -184,6 +340,12 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             f,
             "G_wlsq",
         )
+
+        # Written by first_database.m when it manages to read them out
+        # of the COMSOL model, absent otherwise: the variable names
+        # they are read from belong to the model, not to this code.
+        rho = _load_optional_scalar(f, "rho")
+        mu = _load_optional_scalar(f, "mu")
         if "physics_features" in f:
             physics_features = np.array(
                 f["physics_features"]
@@ -197,27 +359,7 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             )
         else:
             geometry_features = None
-    if neighbors is not None:
 
-        neighbors = [
-            np.asarray(neigh)
-            .squeeze()
-            .astype(np.int64)
-            for neigh in neighbors
-        ]
-    if cell_index is not None:
-        if cell_index.shape[1] == 3:
-            pass
-        elif cell_index.shape[0] == 3:
-            cell_index = cell_index.T
-        else:
-            raise ValueError(
-                f"{file_path}: cell_index has unexpected "
-                f"shape {cell_index.shape}."
-            )
-
-        cell_index = cell_index.astype(np.int64)
-    
     # MATLAB stores arrays in Fortran order: (3, N, T) -> (T, N, 3)
     X = np.transpose(X, (2, 1, 0))
     if physics_features is not None:
@@ -298,90 +440,16 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
     num_nodes = X_input.shape[1]
 
     # ------------------------------------------------------------
-    # Process WLSQ operators
+    # WLSQ geometry for the physics loss
     # ------------------------------------------------------------
 
-    if G_wlsq is not None:
-
-        if neighbors is None:
-            raise ValueError(
-                f"{file_path}: G_wlsq exists but "
-                f"neighbors_python is missing."
-            )
-
-        if len(G_wlsq) != num_nodes:
-            raise ValueError(
-                f"{file_path}: G_wlsq contains "
-                f"{len(G_wlsq)} operators, "
-                f"but mesh has {num_nodes} nodes."
-            )
-
-        processed_G = []
-
-        for node_i, G_i in enumerate(G_wlsq):
-
-            G_i = np.asarray(G_i)
-
-            k_i = len(neighbors[node_i])
-
-            if G_i.shape == (2, k_i):
-                pass
-
-            elif G_i.shape == (k_i, 2):
-                G_i = G_i.T
-
-            else:
-                raise ValueError(
-                    f"{file_path}: G_wlsq[{node_i}] "
-                    f"has shape {G_i.shape}, "
-                    f"expected (2, {k_i})."
-                )
-
-            processed_G.append(G_i)
-
-        G_wlsq = processed_G
-
-
-    # ------------------------------------------------------------
-    # Check WLSQ neighbor indices
-    # ------------------------------------------------------------
-
-    if neighbors is not None:
-
-        if len(neighbors) != num_nodes:
-            raise ValueError(
-                f"{file_path}: neighbors contains "
-                f"{len(neighbors)} entries, "
-                f"but mesh has {num_nodes} nodes."
-            )
-
-        for node_i, neigh in enumerate(neighbors):
-
-            if np.any(neigh < 0) or np.any(neigh >= num_nodes):
-                raise ValueError(
-                    f"{file_path}: invalid WLSQ neighbor "
-                    f"indices for node {node_i}."
-                )
-
-
-    # ------------------------------------------------------------
-    # Check cell indices
-    # ------------------------------------------------------------
-
-    if cell_index is not None:
-
-        if np.any(cell_index < 0):
-            raise ValueError(
-                f"{file_path}: cell_index contains "
-                f"negative indices."
-            )
-
-        if np.any(cell_index >= num_nodes):
-            raise ValueError(
-                f"{file_path}: cell_index references "
-                f"a node outside the mesh."
-            )
-
+    neighbors, G_wlsq, cell_index = _process_wlsq(
+        neighbors,
+        G_wlsq,
+        cell_index,
+        num_nodes,
+        file_path,
+    )
 
     # ------------------------------------------------------------
     # Position array
@@ -398,9 +466,6 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
             f"{file_path}: position array P has shape {P.shape}, "
             f"but the state has {num_nodes} nodes."
         )
-    
-
-    
 
     # ------------------------------------------------------------
     # Geometry features: static per node, not per timestep.
@@ -456,6 +521,8 @@ def load_data(file_path, skip_initial=0, simulation_id=None):
         neighbors=neighbors,
         G_wlsq=G_wlsq,
         cell_index=cell_index,
+        rho=rho,
+        mu=mu,
 
         physics_features=physics_input,
         geometry_features=geometry_features,

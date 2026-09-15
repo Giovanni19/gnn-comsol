@@ -16,9 +16,23 @@ def to_tensor(array, dtype=torch.float32):
     return torch.tensor(np.asarray(array), dtype=dtype)
 
 
-def create_graph_dataset(X, Y, edge_index, edge_weight, simulation_id=None):
+def create_graph_dataset(
+    X,
+    Y,
+    edge_index,
+    edge_weight,
+    simulation_id=None,
+    delta_t=None,
+):
     """
     Build one Data object per snapshot.
+
+    delta_t : array or tensor, optional
+        The PHYSICAL duration of each transition, in seconds, attached
+        to its graph as `dt_physical`. The normalized dt is already in
+        the node features, but a residual with a time derivative in it
+        needs the real one, and recovering it from the normalized value
+        would mean carrying its scaling everywhere it is used.
     """
 
     X = X if isinstance(X, torch.Tensor) else to_tensor(X)
@@ -36,13 +50,30 @@ def create_graph_dataset(X, Y, edge_index, edge_weight, simulation_id=None):
         else to_tensor(edge_weight)
     )
 
+    if delta_t is not None:
+
+        delta_t = (
+            delta_t
+            if isinstance(delta_t, torch.Tensor)
+            else to_tensor(delta_t)
+        )
+
+        if len(delta_t) != len(X):
+            raise ValueError(
+                f"delta_t has {len(delta_t)} samples, "
+                f"but X has {len(X)}."
+            )
+
     return [
         Data(
             x=X[i],
             y=Y[i],
             edge_index=edge_index,
             edge_weight=edge_weight,
-            simulation_id=simulation_id
+            simulation_id=simulation_id,
+            dt_physical=(
+                None if delta_t is None else delta_t[i].item()
+            ),
         )
         for i in range(X.shape[0])
     ]
@@ -137,6 +168,7 @@ def create_multi_simulation_graph_dataset(
             simulation["edge_index"],
             simulation["edge_weight"],
             simulation_id=simulation["simulation_id"],
+            delta_t=simulation["dt_physical"],
         )
 
         dataset.extend(simulation_dataset)
